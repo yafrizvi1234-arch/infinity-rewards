@@ -13,6 +13,7 @@ import { HomeDashboard } from './components/HomeDashboard';
 import { LeaderboardScreen } from './components/LeaderboardScreen';
 import { LinkManagerScreen } from './components/LinkManagerScreen';
 import { NotificationsDrawer } from './components/NotificationsDrawer';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { ProfileScreen } from './components/ProfileScreen';
 import { ShopScreen } from './components/ShopScreen';
 import { TopNav } from './components/TopNav';
@@ -1821,6 +1822,7 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      <OfflineIndicator />
     </div>
   );
 }

@@ -770,6 +770,25 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    if (
+      origin &&
+      (origin === 'https://yafrizvi1234-arch.github.io' ||
+        origin.startsWith('http://localhost:') ||
+        origin.startsWith('http://127.0.0.1:'))
+    ) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,Accept');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
   app.use(express.json({ limit: '64kb' }));
 
   app.get('/api/health', (_req, res) => {

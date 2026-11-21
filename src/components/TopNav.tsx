@@ -1,6 +1,7 @@
 import React from 'react';
 import { BarChart3, Bell, Menu } from 'lucide-react';
 import { Avatar } from './Avatar';
+import { PWAInstallButton } from './PWAInstallButton';
 import { MainScreen, UserProfileData } from '../types';
 
 interface TopNavProps {
@@ -52,8 +53,9 @@ export const TopNav: React.FC<TopNavProps> = ({
           </button>
         </div>
 
-        {/* Right: User Statistics, Notification Icon, User Profile Avatar */}
+        {/* Right: PWA Install, User Statistics, Notification Icon, User Profile Avatar */}
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
+          <PWAInstallButton />
           <button
             type="button"
             onClick={onOpenProfile}

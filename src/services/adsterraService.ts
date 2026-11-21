@@ -52,6 +52,29 @@ function timestampToMs(val: unknown): number {
   return Date.now();
 }
 
+const STORAGE_API_BASE_KEY = 'infinity_rewards_api_base_url';
+
+export function getConfiguredApiBaseUrl(): string {
+  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || '';
+  if (envBase) {
+    return envBase.replace(/\/+$/, '');
+  }
+  try {
+    const saved = window.localStorage.getItem(STORAGE_API_BASE_KEY)?.trim() || '';
+    return saved.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function resolveApiEndpoint(endpoint: string): string {
+  const base = getConfiguredApiBaseUrl();
+  if (!base) {
+    return endpoint;
+  }
+  return `${base}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+}
+
 async function getVerifiedBearerToken(): Promise<string> {
   const current = auth.currentUser;
   if (!current || !current.emailVerified) {
@@ -65,7 +88,8 @@ async function authedApiRequest<T>(
   options: { method: 'GET' | 'POST' | 'DELETE'; body?: Record<string, unknown> }
 ): Promise<T> {
   const token = await getVerifiedBearerToken();
-  const res = await fetch(endpoint, {
+  const targetUrl = resolveApiEndpoint(endpoint);
+  const res = await fetch(targetUrl, {
     method: options.method,
     headers: {
       Accept: 'application/json',
@@ -74,6 +98,13 @@ async function authedApiRequest<T>(
     },
     ...(options.body ? { body: JSON.stringify(options.body) } : {}),
   });
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      'Backend API server is unavailable on static hosting. Deploy on Render/Cloud Run or open the Shared App URL for Adsterra API sync.'
+    );
+  }
 
   const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
   if (!res.ok) {

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: infinity-rewards
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ADSTERRA_SECRET_MASTER_KEY
+        generateValue: true
