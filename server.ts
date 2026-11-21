@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 
@@ -1047,12 +1048,21 @@ export function createApp() {
 
 async function startServer() {
   const app = createApp();
+  const httpServer = http.createServer(app);
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
+    if (process.env.DISABLE_HMR === undefined) {
+      process.env.DISABLE_HMR = 'true';
+    }
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: { server: httpServer },
+        allowedHosts: true,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1064,7 +1074,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`INFINITY REWARDS server listening on http://0.0.0.0:${PORT}`);
   });
 }
