@@ -3,11 +3,13 @@ services:
     name: infinity-rewards
     runtime: node
     plan: free
-    buildCommand: npm install --legacy-peer-deps && npm run build
+    buildCommand: npm install --include=dev --legacy-peer-deps && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 22.23.2
       - key: ADSTERRA_SECRET_MASTER_KEY
         generateValue: true

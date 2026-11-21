@@ -1069,7 +1069,11 @@ async function startServer() {
   } else {
     const distDir = path.join(ROOT_DIR, 'dist');
     app.use(express.static(distDir));
-    app.get('/{*splat}', (_req, res) => {
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' || req.path.startsWith('/api/')) {
+        next();
+        return;
+      }
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
