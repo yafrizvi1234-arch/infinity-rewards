@@ -67,52 +67,12 @@ export function getConfiguredApiBaseUrl(): string {
   }
 }
 
-export function setConfiguredApiBaseUrl(rawUrl: string): string {
-  const cleaned = rawUrl.trim().replace(/\/+$/, '');
-  try {
-    if (!cleaned) {
-      window.localStorage.removeItem(STORAGE_API_BASE_KEY);
-      return '';
-    }
-    const parsed = new URL(cleaned.startsWith('http') ? cleaned : `https://${cleaned}`);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Backend URL must start with https:// or http://');
-    }
-    const normalized = parsed.origin;
-    window.localStorage.setItem(STORAGE_API_BASE_KEY, normalized);
-    return normalized;
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('Backend URL')) {
-      throw err;
-    }
-    throw new Error('Please enter a valid backend server URL (e.g. https://infinity-rewards.onrender.com).');
-  }
-}
-
-function resolveApiEndpoint(endpoint: string, overrideBase?: string): string {
-  const base = (overrideBase ?? getConfiguredApiBaseUrl()).replace(/\/+$/, '');
+function resolveApiEndpoint(endpoint: string): string {
+  const base = getConfiguredApiBaseUrl();
   if (!base) {
     return endpoint;
   }
   return `${base}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-}
-
-export async function checkBackendHealth(overrideBase?: string): Promise<boolean> {
-  try {
-    const targetUrl = resolveApiEndpoint('/api/health', overrideBase);
-    const res = await fetch(targetUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    });
-    const contentType = res.headers.get('content-type') || '';
-    if (!res.ok || !contentType.includes('application/json')) {
-      return false;
-    }
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-    return Boolean(data.ok);
-  } catch {
-    return false;
-  }
 }
 
 async function getVerifiedBearerToken(): Promise<string> {
