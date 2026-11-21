@@ -22,6 +22,11 @@ import {
   Unplug,
 } from 'lucide-react';
 import {
+  checkBackendHealth,
+  getConfiguredApiBaseUrl,
+  setConfiguredApiBaseUrl,
+} from '../services/adsterraService';
+import {
   AdsterraBackendStatus,
   AdsterraDatePreset,
   AdsterraIntegrationRecord,
@@ -157,6 +162,26 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
   const [batchIds, setBatchIds] = useState<string[]>([]);
   const [publishingUrl, setPublishingUrl] = useState<string | null>(null);
   const [deletingPersonalId, setDeletingPersonalId] = useState<string | null>(null);
+
+  // Direct Smartlink form (works natively via Firebase on GitHub Pages without Node backend)
+  const [directTitle, setDirectTitle] = useState('');
+  const [directUrl, setDirectUrl] = useState('');
+  const [savingDirectLink, setSavingDirectLink] = useState(false);
+
+  // Backend availability & optional remote Node server URL (for static hosts like GitHub Pages)
+  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
+  const [remoteBackendInput, setRemoteBackendInput] = useState(() => getConfiguredApiBaseUrl());
+  const [testingBackend, setTestingBackend] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    checkBackendHealth().then((ok) => {
+      if (active) setBackendAvailable(ok);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const hasBackendKey = backendStatus.hasApiKey || Boolean(integration?.hasApiKey);
   const isConnected = integration?.status === 'connected' || hasBackendKey;
@@ -470,6 +495,84 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       });
     } finally {
       setDeletingPersonalId(null);
+    }
+  };
+
+  const handleSaveDirectSmartlink = async (andPublish: boolean) => {
+    if (savingDirectLink || !directUrl.trim()) return;
+    setFeedback(null);
+    setSavingDirectLink(true);
+    try {
+      const cleanTitle = directTitle.trim() || 'Adsterra Smartlink';
+      const check = validateAndNormalizeUrl(directUrl);
+      const normalized = check.url || check.normalizedUrl;
+      if (!check.valid || !normalized) {
+        throw new Error(check.error || 'Please enter a valid Smartlink URL (https://...)');
+      }
+      await onCreatePersonalSmartlink({
+        title: cleanTitle,
+        rawUrl: normalized,
+        category: 'Other',
+      });
+      if (andPublish && onPublishToCommunity) {
+        await onPublishToCommunity({
+          title: cleanTitle,
+          url: normalized,
+          category: 'Other',
+        });
+      }
+      setDirectTitle('');
+      setDirectUrl('');
+      setFeedback({
+        type: 'success',
+        message: andPublish
+          ? `"${cleanTitle}" saved & published live to Mutual Community Exchange.`
+          : `"${cleanTitle}" saved to My Smartlinks.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to save Smartlink.',
+      });
+    } finally {
+      setSavingDirectLink(false);
+    }
+  };
+
+  const handleSaveRemoteBackend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (testingBackend) return;
+    setFeedback(null);
+    setTestingBackend(true);
+    try {
+      const savedUrl = setConfiguredApiBaseUrl(remoteBackendInput);
+      const ok = await checkBackendHealth(savedUrl || undefined);
+      setBackendAvailable(ok);
+      if (!savedUrl) {
+        setFeedback({
+          type: ok ? 'success' : 'error',
+          message: ok
+            ? 'Switched to same-origin backend.'
+            : 'Cleared custom backend URL. No local /api server detected on this host.',
+        });
+      } else if (ok) {
+        setFeedback({
+          type: 'success',
+          message: `Connected to backend (${savedUrl}). You can now verify your Adsterra API token.`,
+        });
+      } else {
+        setFeedback({
+          type: 'error',
+          message: `Could not reach ${savedUrl}/api/health. Check that the Render server is running.`,
+        });
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Invalid backend URL.',
+      });
+    } finally {
+      setTestingBackend(false);
     }
   };
 
@@ -1172,6 +1275,46 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
           </p>
         )}
 
+        {backendAvailable === false && (
+          <div className="rounded-2xl border border-amber-400/35 bg-amber-500/10 p-4 space-y-3 text-xs">
+            <div className="space-y-1">
+              <p className="font-bold text-amber-200">
+                Static Host Detected — Direct Smartlinks Work Now; API Stats Need a Node Backend
+              </p>
+              <p className="leading-relaxed text-slate-300">
+                Adsterra&apos;s API blocks direct browser requests (CORS), and GitHub Pages cannot run a Node.js server. You can{' '}
+                <strong className="text-white">paste &amp; publish your Smartlink URL directly below</strong> right away—or connect a free Render backend for live USD/CPM API stats.
+              </p>
+            </div>
+
+            <form onSubmit={handleSaveRemoteBackend} className="flex flex-col gap-2 sm:flex-row">
+              <input
+                type="url"
+                value={remoteBackendInput}
+                onChange={(e) => setRemoteBackendInput(e.target.value)}
+                placeholder="Optional Render Backend URL (e.g. https://infinity-rewards.onrender.com)"
+                className="font-mono-num min-h-[38px] flex-1 rounded-xl border border-white/15 bg-[#050817]/90 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00F5FF] focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={testingBackend}
+                className="min-h-[38px] shrink-0 rounded-xl border border-[#00F5FF]/45 bg-[#00F5FF]/15 px-3.5 py-1.5 text-xs font-bold text-[#00F5FF] hover:bg-[#00F5FF]/25 disabled:opacity-50"
+              >
+                {testingBackend ? 'Checking...' : 'Save & Test Server'}
+              </button>
+              <a
+                href="https://render.com/deploy?repo=https://github.com/yafrizvi1234-arch/infinity-rewards"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-xl border border-[#00FF87]/40 bg-[#00FF87]/15 px-3.5 py-1.5 text-xs font-bold text-[#00FF87] hover:bg-[#00FF87]/25"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                <span>Deploy Backend Free</span>
+              </a>
+            </form>
+          </div>
+        )}
+
         {feedback && (
           <div
             role="status"
@@ -1224,12 +1367,58 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
           <span className="font-bold text-[#00FF87]">Mutual Exchange Active:</span> Your own Smartlinks are hidden from your own Auto-Visit queue so you never self-click. Click <span className="font-bold text-white">Publish to Community</span> so other members visit your Smartlinks from their devices while you visit theirs.
         </div>
 
+        {/* Direct Smartlink Add & Publish (100% Firebase — Works on GitHub Pages & Everywhere) */}
+        <div className="rounded-2xl border border-[#00F5FF]/25 bg-[#070B20]/80 p-4 space-y-2.5">
+          <p className="text-xs font-bold text-[#00F5FF]">
+            Add Adsterra Smartlink URL Directly (No Backend Needed)
+          </p>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+            <input
+              type="text"
+              maxLength={80}
+              value={directTitle}
+              onChange={(e) => setDirectTitle(e.target.value)}
+              placeholder="Title (e.g. My Smartlink)"
+              className="min-h-[40px] rounded-xl border border-white/15 bg-[#050817]/90 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00F5FF] focus:outline-none sm:col-span-4"
+            />
+            <input
+              type="url"
+              value={directUrl}
+              onChange={(e) => setDirectUrl(e.target.value)}
+              placeholder="Paste your Adsterra Smartlink URL (https://...)"
+              className="min-h-[40px] rounded-xl border border-white/15 bg-[#050817]/90 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00F5FF] focus:outline-none sm:col-span-8"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={savingDirectLink || !directUrl.trim()}
+              onClick={() => void handleSaveDirectSmartlink(false)}
+              className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[#00F5FF]/45 bg-[#00F5FF]/15 px-3.5 py-1.5 text-xs font-bold text-[#00F5FF] hover:bg-[#00F5FF]/25 disabled:opacity-50"
+            >
+              <Link2 className="h-3.5 w-3.5" />
+              <span>{savingDirectLink ? 'Saving...' : 'Save Smartlink'}</span>
+            </button>
+            {onPublishToCommunity && (
+              <button
+                type="button"
+                disabled={savingDirectLink || !directUrl.trim()}
+                onClick={() => void handleSaveDirectSmartlink(true)}
+                className="flex min-h-[38px] items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#B84DFF] to-[#00F5FF] px-4 py-1.5 text-xs font-bold text-white hover:opacity-95 disabled:opacity-50"
+              >
+                <Globe className="h-3.5 w-3.5" />
+                <span>{savingDirectLink ? 'Publishing...' : 'Save & Publish to Community'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Ready Smartlinks List */}
         {syncedSmartlinkItems.length === 0 && unlinkedPlacements.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-[#070B20]/65 p-6 text-center text-xs text-slate-400">
             {hasBackendKey
               ? 'No placements synced yet. Tap "Sync Now" above after creating a Smartlink in Adsterra.'
-              : 'Connect your Adsterra API Token above to load your Smartlinks and full stats automatically.'}
+              : 'Paste your Adsterra Smartlink URL above to publish it right away, or connect your API Token when running on a Node backend.'}
           </div>
         ) : (
           <div className="space-y-2.5">
