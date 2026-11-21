@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#070D22" />
+      <stop offset="55%" stop-color="#040713" />
+      <stop offset="100%" stop-color="#0C0720" />
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="32%" cy="46%" r="48%">
+      <stop offset="0%" stop-color="#00F5FF" stop-opacity="0.32" />
+      <stop offset="100%" stop-color="#00F5FF" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glowPink" cx="68%" cy="54%" r="48%">
+      <stop offset="0%" stop-color="#FF2E93" stop-opacity="0.30" />
+      <stop offset="100%" stop-color="#FF2E93" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="ring" x1="90" y1="160" x2="422" y2="352" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00F5FF" />
+      <stop offset="50%" stop-color="#B84DFF" />
+      <stop offset="100%" stop-color="#FF2E93" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <rect width="512" height="512" rx="112" fill="url(#glowCyan)" />
+  <rect width="512" height="512" rx="112" fill="url(#glowPink)" />
+  <rect x="14" y="14" width="484" height="484" rx="100" stroke="url(#ring)" stroke-opacity="0.35" stroke-width="4" />
+  <path
+    d="M174 188C128 188 94 220 94 256C94 292 128 324 174 324C214 324 238 296 256 256C274 216 298 188 338 188C384 188 418 220 418 256C418 292 384 324 338 324C298 324 274 296 256 256C238 216 214 188 174 188Z"
+    stroke="url(#ring)"
+    stroke-width="34"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/infinity-rewards/sw.js', { scope: '/infinity-rewards/' })})}
