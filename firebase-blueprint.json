@@ -1,0 +1,1088 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Private owner-only user profile, real statistics, and unlocked perks.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique lowercase username without @ prefix.",
+          "minLength": 3,
+          "maxLength": 24,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name.",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "bio": {
+          "type": "string",
+          "description": "Short user bio.",
+          "maxLength": 160
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL (Firebase Storage URL or compressed fallback).",
+          "maxLength": 140000
+        },
+        "activeAccent": {
+          "type": "string",
+          "description": "Active avatar frame accent color.",
+          "enum": ["cyan", "purple", "blue"]
+        },
+        "totalPoints": {
+          "type": "integer",
+          "description": "Real earned points persisted in Firestore."
+        },
+        "totalVisits": {
+          "type": "integer",
+          "description": "Total completed visits count."
+        },
+        "successfulVisits": {
+          "type": "integer",
+          "description": "Verified successful visits count."
+        },
+        "visitedToday": {
+          "type": "integer",
+          "description": "Visits completed in active session/day."
+        },
+        "unlockedShopIds": {
+          "type": "array",
+          "description": "Bounded list of unlocked shop item IDs (max 20)."
+        },
+        "lastActivityId": {
+          "type": "string",
+          "description": "Most recent activity document ID linked atomically to stat increments.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of account workspace creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest update."
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "displayName",
+        "bio",
+        "photoURL",
+        "activeAccent",
+        "totalPoints",
+        "totalVisits",
+        "successfulVisits",
+        "visitedToday",
+        "unlockedShopIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Non-PII public creator card for discovery, leaderboards, and follow lists.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 24,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 140000
+        },
+        "specialty": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "activeAccent": {
+          "type": "string",
+          "enum": ["cyan", "purple", "blue"]
+        },
+        "totalPoints": {
+          "type": "integer"
+        },
+        "totalVisits": {
+          "type": "integer"
+        },
+        "followersCount": {
+          "type": "integer"
+        },
+        "followingCount": {
+          "type": "integer"
+        },
+        "isDiscoverable": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "displayName",
+        "bio",
+        "photoURL",
+        "specialty",
+        "activeAccent",
+        "totalPoints",
+        "totalVisits",
+        "followersCount",
+        "followingCount",
+        "isDiscoverable",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Atomic uniqueness lock mapping lowercase username to owner UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "FollowRelation": {
+      "title": "FollowRelation",
+      "description": "Deterministic follow edge preventing duplicate follows via {followerId}_{targetId} ID.",
+      "type": "object",
+      "properties": {
+        "followerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "followerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "followerUsername": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "followerAvatar": {
+          "type": "string",
+          "maxLength": 140000
+        },
+        "targetId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "targetName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "targetUsername": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "targetAvatar": {
+          "type": "string",
+          "maxLength": 140000
+        },
+        "isRealTarget": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "followerId",
+        "followerName",
+        "followerUsername",
+        "followerAvatar",
+        "targetId",
+        "targetName",
+        "targetUsername",
+        "targetAvatar",
+        "isRealTarget",
+        "createdAt"
+      ]
+    },
+    "ActivityRecord": {
+      "title": "ActivityRecord",
+      "description": "Immutable per-user activity history entry for visits, points, follows, and profile edits.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "type": {
+          "type": "string",
+          "enum": ["visit", "points", "follow", "unfollow", "profile_update"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 180
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "pointsDelta": {
+          "type": "integer"
+        },
+        "targetId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "type", "title", "description", "category", "pointsDelta", "createdAt"]
+    },
+    "AdminMember": {
+      "title": "AdminMember",
+      "description": "Read-only admin authorization marker provisioned via console/server.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "role", "createdAt"]
+    },
+    "ManagedLink": {
+      "title": "ManagedLink",
+      "description": "User-submitted Smartlink or Website URL subject to validation and admin moderation.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "ownerUsername": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "ownerAvatar": {
+          "type": "string",
+          "maxLength": 140000
+        },
+        "type": {
+          "type": "string",
+          "enum": ["smartlink", "website"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 300
+        },
+        "url": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "normalizedUrl": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "urlKey": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 96,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "isHttps": {
+          "type": "boolean"
+        },
+        "category": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "cooldownSec": {
+          "type": "integer"
+        },
+        "reportCount": {
+          "type": "integer"
+        },
+        "moderationNote": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "moderatedBy": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "moderatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "ownerName",
+        "ownerUsername",
+        "ownerAvatar",
+        "type",
+        "title",
+        "description",
+        "url",
+        "normalizedUrl",
+        "urlKey",
+        "domain",
+        "isHttps",
+        "category",
+        "status",
+        "cooldownSec",
+        "reportCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LinkRegistryEntry": {
+      "title": "LinkRegistryEntry",
+      "description": "Atomic duplicate-URL prevention lock keyed by canonical URL hash.",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "normalizedUrl": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["linkId", "ownerId", "normalizedUrl", "createdAt"]
+    },
+    "LinkVisitRecord": {
+      "title": "LinkVisitRecord",
+      "description": "Append-only external link opening history for spam-prevention cooldown (zero points/rewards).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "linkId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "linkTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "linkType": {
+          "type": "string",
+          "enum": ["smartlink", "website"]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "url": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "linkId", "linkTitle", "linkType", "category", "domain", "url", "createdAt"]
+    },
+    "LinkReport": {
+      "title": "LinkReport",
+      "description": "Deterministic user report against a submitted link keyed by {reporterId}_{linkId}.",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "linkTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "linkUrl": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "reporterId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reporterUsername": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 240
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "resolved", "dismissed"]
+        },
+        "adminNote": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "linkId",
+        "linkTitle",
+        "linkUrl",
+        "reporterId",
+        "reporterUsername",
+        "reason",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ModerationLog": {
+      "title": "ModerationLog",
+      "description": "Immutable admin moderation audit trail.",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "linkTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "targetOwnerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "action": {
+          "type": "string",
+          "enum": ["approve", "reject", "remove", "resolve_report", "dismiss_report"]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "adminUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adminEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "linkId",
+        "linkTitle",
+        "targetOwnerId",
+        "action",
+        "reason",
+        "adminUid",
+        "adminEmail",
+        "createdAt"
+      ]
+    },
+    "PaymentTransactionLock": {
+      "title": "PaymentTransactionLock",
+      "description": "Immutable uniqueness lock keyed by normalized uppercase Transaction ID to prevent duplicate payment claims.",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["requestId", "createdAt"]
+    },
+    "PaymentRequest": {
+      "title": "PaymentRequest",
+      "description": "User-submitted 50 BDT payment proof for Multi (5) access subject to verified admin approval.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "userUsername": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "planId": {
+          "type": "string",
+          "enum": ["multi_5"]
+        },
+        "amountBdt": {
+          "type": "integer"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["bkash", "nagad"]
+        },
+        "paymentNumber": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 24
+        },
+        "senderNumber": {
+          "type": "string",
+          "maxLength": 24
+        },
+        "transactionId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "screenshotUrl": {
+          "type": "string",
+          "minLength": 30,
+          "maxLength": 260000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "adminNote": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "reviewedBy": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "reviewedByEmail": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "userName",
+        "userUsername",
+        "planId",
+        "amountBdt",
+        "paymentMethod",
+        "paymentNumber",
+        "transactionId",
+        "screenshotUrl",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MultiEntitlement": {
+      "title": "MultiEntitlement",
+      "description": "Server-rule-enforced Multi (5) entitlement activated exclusively by verified admin alongside an approved payment request.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "planId": {
+          "type": "string",
+          "enum": ["multi_5"]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "maxConcurrentLinks": {
+          "type": "integer"
+        },
+        "amountBdt": {
+          "type": "integer"
+        },
+        "sourceRequestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "transactionId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "approvedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "approvedByEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "activatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "planId",
+        "active",
+        "maxConcurrentLinks",
+        "amountBdt",
+        "sourceRequestId",
+        "transactionId",
+        "approvedBy",
+        "approvedByEmail",
+        "activatedAt",
+        "updatedAt"
+      ]
+    },
+    "PaymentConfig": {
+      "title": "PaymentConfig",
+      "description": "Admin-managed bKash and Nagad Personal Payment Numbers for 50 BDT Multi (5) checkout.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["multi_5"]
+        },
+        "bkashNumber": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 24,
+          "pattern": "^[0-9+\\-\\s]{6,24}$"
+        },
+        "nagadNumber": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 24,
+          "pattern": "^[0-9+\\-\\s]{6,24}$"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedByEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "bkashNumber", "nagadNumber", "updatedBy", "updatedByEmail", "updatedAt"]
+    },
+    "AdsterraIntegration": {
+      "title": "AdsterraIntegration",
+      "description": "Strictly owner-isolated per-user Adsterra Publisher connection metadata (never stores raw API keys).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "connectionMode": {
+          "type": "string",
+          "enum": ["manual_smartlink", "official_api_key"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["disconnected", "connected"]
+        },
+        "publisherId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "publisherLabel": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "smartlinkUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "smartlinkTitle": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "hasApiKey": {
+          "type": "boolean"
+        },
+        "apiKeyHint": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "apiVerified": {
+          "type": "boolean"
+        },
+        "verifiedDomainsCount": {
+          "type": "integer"
+        },
+        "verifiedPlacementsCount": {
+          "type": "integer"
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "ownerUserId",
+        "connectionMode",
+        "status",
+        "publisherId",
+        "publisherLabel",
+        "smartlinkUrl",
+        "smartlinkTitle",
+        "hasApiKey",
+        "apiKeyHint",
+        "apiVerified",
+        "verifiedDomainsCount",
+        "verifiedPlacementsCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPersonalSmartlink": {
+      "title": "UserPersonalSmartlink",
+      "description": "Strictly owner-isolated personal Adsterra Smartlink keyed by ownerUserId so user and admin Smartlinks never mix.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "url": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "isHttps": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUserId",
+        "title",
+        "url",
+        "domain",
+        "category",
+        "isHttps",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserWorkspace" },
+      "description": "Owner-only user workspace storing profile settings and protected stats."
+    },
+    "/publicProfiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Public non-PII creator profile for discovery and follow counts."
+    },
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameClaim" },
+      "description": "Unique username reservation registry."
+    },
+    "/follows/{followId}": {
+      "schema": { "$ref": "#/entities/FollowRelation" },
+      "description": "Follow relationships keyed by {followerId}_{targetId}."
+    },
+    "/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/ActivityRecord" },
+      "description": "Append-only activity history ledger per user."
+    },
+    "/admins/{docId}": {
+      "schema": { "$ref": "#/entities/AdminMember" },
+      "description": "Locked collection (all client reads/writes denied); admin authorization is strictly verified email-based via Firebase Auth token."
+    },
+    "/links/{linkId}": {
+      "schema": { "$ref": "#/entities/ManagedLink" },
+      "description": "Submitted Smartlinks and Websites with moderation lifecycle."
+    },
+    "/linkRegistry/{urlKey}": {
+      "schema": { "$ref": "#/entities/LinkRegistryEntry" },
+      "description": "Canonical URL hash registry preventing duplicate link submissions."
+    },
+    "/linkVisits/{visitId}": {
+      "schema": { "$ref": "#/entities/LinkVisitRecord" },
+      "description": "Per-user external link opening history for spam prevention (no points)."
+    },
+    "/linkReports/{reportId}": {
+      "schema": { "$ref": "#/entities/LinkReport" },
+      "description": "User-submitted reports on links keyed by {reporterId}_{linkId}."
+    },
+    "/moderationLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ModerationLog" },
+      "description": "Admin-only immutable moderation action logs."
+    },
+    "/paymentTransactions/{txKey}": {
+      "schema": { "$ref": "#/entities/PaymentTransactionLock" },
+      "description": "Immutable Transaction ID uniqueness lock preventing duplicate payment submissions."
+    },
+    "/paymentRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/PaymentRequest" },
+      "description": "Owner-and-admin-only 50 BDT Multi (5) payment proof requests."
+    },
+    "/multiEntitlements/{userId}": {
+      "schema": { "$ref": "#/entities/MultiEntitlement" },
+      "description": "Per-user Multi (5) activation state writable exclusively by verified admin with an approved payment request."
+    },
+    "/paymentConfig/{configId}": {
+      "schema": { "$ref": "#/entities/PaymentConfig" },
+      "description": "Admin-editable bKash and Nagad personal payment numbers readable by verified users."
+    },
+    "/adsterraIntegrations/{userId}": {
+      "schema": { "$ref": "#/entities/AdsterraIntegration" },
+      "description": "Strictly owner-only per-user Adsterra connection metadata (zero cross-user or admin access)."
+    },
+    "/userSmartlinks/{linkId}": {
+      "schema": { "$ref": "#/entities/UserPersonalSmartlink" },
+      "description": "Strictly owner-only personal Smartlinks keyed by ownerUserId (zero cross-user or admin mixing)."
+    }
+  }
+}

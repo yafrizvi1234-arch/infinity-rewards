@@ -1,0 +1,1265 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUsername(name) {
+      return name is string && name.size() >= 3 && name.size() <= 24 && name.matches('^[a-z0-9_]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Strictly Email-Based Admin Authorization (Case-Insensitive + Verified Email Required)
+    function isVerifiedAdminEmail() {
+      return isVerifiedUser()
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'yafrizvi1234@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedAdminEmail();
+    }
+
+    function isValidBoundedList(listVal) {
+      return listVal is list
+        && listVal.size() <= 20
+        && (listVal.size() == 0 || (listVal[0] is string && listVal[0].size() <= 64));
+    }
+
+    function isValidAccent(val) {
+      return val is string && val in ['cyan', 'purple', 'blue'];
+    }
+
+    function isValidPhotoUrl(val) {
+      return val is string && val.size() <= 140000;
+    }
+
+    function isValidHttpUrl(val) {
+      return val is string
+        && val.size() >= 10
+        && val.size() <= 500
+        && val.matches('^https?://[^\\s]+$');
+    }
+
+    function isValidUserWorkspace(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'displayName',
+          'bio',
+          'photoURL',
+          'activeAccent',
+          'totalPoints',
+          'totalVisits',
+          'successfulVisits',
+          'visitedToday',
+          'unlockedShopIds',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'username',
+          'displayName',
+          'bio',
+          'photoURL',
+          'activeAccent',
+          'totalPoints',
+          'totalVisits',
+          'successfulVisits',
+          'visitedToday',
+          'unlockedShopIds',
+          'lastActivityId',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.uid == request.auth.uid && data.uid == userId
+        && isValidUsername(data.username)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50
+        && data.bio is string && data.bio.size() <= 160
+        && isValidPhotoUrl(data.photoURL)
+        && isValidAccent(data.activeAccent)
+        && data.totalPoints is int && data.totalPoints >= 0 && data.totalPoints <= 1000000
+        && data.totalVisits is int && data.totalVisits >= 0 && data.totalVisits <= 1000000
+        && data.successfulVisits is int && data.successfulVisits >= 0 && data.successfulVisits <= 1000000
+        && data.visitedToday is int && data.visitedToday >= 0 && data.visitedToday <= 10000
+        && isValidBoundedList(data.unlockedShopIds)
+        && (!('lastActivityId' in data) || isValidId(data.lastActivityId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'displayName',
+          'bio',
+          'photoURL',
+          'specialty',
+          'activeAccent',
+          'totalPoints',
+          'totalVisits',
+          'followersCount',
+          'followingCount',
+          'isDiscoverable',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'username',
+          'displayName',
+          'bio',
+          'photoURL',
+          'specialty',
+          'activeAccent',
+          'totalPoints',
+          'totalVisits',
+          'followersCount',
+          'followingCount',
+          'isDiscoverable',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.uid == userId
+        && isValidUsername(data.username)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50
+        && data.bio is string && data.bio.size() <= 160
+        && isValidPhotoUrl(data.photoURL)
+        && data.specialty is string && data.specialty.size() >= 1 && data.specialty.size() <= 40
+        && isValidAccent(data.activeAccent)
+        && data.totalPoints is int && data.totalPoints >= 0 && data.totalPoints <= 1000000
+        && data.totalVisits is int && data.totalVisits >= 0 && data.totalVisits <= 1000000
+        && data.followersCount is int && data.followersCount >= 0 && data.followersCount <= 1000000
+        && data.followingCount is int && data.followingCount >= 0 && data.followingCount <= 1000000
+        && data.isDiscoverable is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFollow(data, followId) {
+      return data.keys().hasAll([
+          'followerId',
+          'followerName',
+          'followerUsername',
+          'followerAvatar',
+          'targetId',
+          'targetName',
+          'targetUsername',
+          'targetAvatar',
+          'isRealTarget',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'followerId',
+          'followerName',
+          'followerUsername',
+          'followerAvatar',
+          'targetId',
+          'targetName',
+          'targetUsername',
+          'targetAvatar',
+          'isRealTarget',
+          'createdAt'
+        ])
+        && isValidId(data.followerId)
+        && data.followerId == request.auth.uid
+        && isValidId(data.targetId)
+        && data.targetId != request.auth.uid
+        && followId == (request.auth.uid + '_' + data.targetId)
+        && data.followerName is string && data.followerName.size() >= 1 && data.followerName.size() <= 50
+        && data.followerUsername is string && data.followerUsername.size() >= 2 && data.followerUsername.size() <= 32
+        && isValidPhotoUrl(data.followerAvatar)
+        && data.targetName is string && data.targetName.size() >= 1 && data.targetName.size() <= 50
+        && data.targetUsername is string && data.targetUsername.size() >= 2 && data.targetUsername.size() <= 32
+        && isValidPhotoUrl(data.targetAvatar)
+        && data.isRealTarget is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isValidActivity(data) {
+      return data.keys().hasAll([
+          'uid',
+          'type',
+          'title',
+          'description',
+          'category',
+          'pointsDelta',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'type',
+          'title',
+          'description',
+          'category',
+          'pointsDelta',
+          'targetId',
+          'createdAt'
+        ])
+        && data.uid is string && data.uid == request.auth.uid
+        && data.type is string && data.type in ['visit', 'points', 'follow', 'unfollow', 'profile_update']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 180
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 40
+        && data.pointsDelta is int && data.pointsDelta >= -500 && data.pointsDelta <= 35
+        && (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidManagedLink(data, linkId) {
+      return data.keys().hasAll([
+          'id',
+          'ownerId',
+          'ownerName',
+          'ownerUsername',
+          'ownerAvatar',
+          'type',
+          'title',
+          'description',
+          'url',
+          'normalizedUrl',
+          'urlKey',
+          'domain',
+          'isHttps',
+          'category',
+          'status',
+          'cooldownSec',
+          'reportCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'ownerId',
+          'ownerName',
+          'ownerUsername',
+          'ownerAvatar',
+          'type',
+          'title',
+          'description',
+          'url',
+          'normalizedUrl',
+          'urlKey',
+          'domain',
+          'isHttps',
+          'category',
+          'status',
+          'cooldownSec',
+          'reportCount',
+          'moderationNote',
+          'moderatedBy',
+          'moderatedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == linkId
+        && isValidId(data.ownerId)
+        && data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 50
+        && data.ownerUsername is string && data.ownerUsername.size() >= 2 && data.ownerUsername.size() <= 32
+        && isValidPhotoUrl(data.ownerAvatar)
+        && data.type is string && data.type in ['smartlink', 'website']
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 80
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 300
+        && isValidHttpUrl(data.url)
+        && isValidHttpUrl(data.normalizedUrl)
+        && isValidId(data.urlKey) && data.urlKey.size() >= 8 && data.urlKey.size() <= 96
+        && data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120
+        && data.isHttps is bool
+        && data.category is string && data.category.size() >= 2 && data.category.size() <= 40
+        && data.status is string && data.status in ['pending', 'approved', 'rejected']
+        && data.cooldownSec is int && data.cooldownSec >= 30 && data.cooldownSec <= 300
+        && data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 10000
+        && (!('moderationNote' in data) || (data.moderationNote is string && data.moderationNote.size() <= 240))
+        && (!('moderatedBy' in data) || (data.moderatedBy is string && data.moderatedBy.size() <= 128))
+        && (!('moderatedAt' in data) || data.moderatedAt is timestamp)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLinkVisit(data) {
+      return data.keys().hasAll([
+          'uid',
+          'linkId',
+          'linkTitle',
+          'linkType',
+          'category',
+          'domain',
+          'url',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'linkId',
+          'linkTitle',
+          'linkType',
+          'category',
+          'domain',
+          'url',
+          'createdAt'
+        ])
+        && isValidId(data.uid) && data.uid == request.auth.uid
+        && isValidId(data.linkId)
+        && data.linkTitle is string && data.linkTitle.size() >= 1 && data.linkTitle.size() <= 80
+        && data.linkType is string && data.linkType in ['smartlink', 'website']
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 40
+        && data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120
+        && isValidHttpUrl(data.url)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLinkReport(data, reportId) {
+      return data.keys().hasAll([
+          'linkId',
+          'linkTitle',
+          'linkUrl',
+          'reporterId',
+          'reporterUsername',
+          'reason',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'linkId',
+          'linkTitle',
+          'linkUrl',
+          'reporterId',
+          'reporterUsername',
+          'reason',
+          'status',
+          'adminNote',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.linkId)
+        && data.linkTitle is string && data.linkTitle.size() >= 1 && data.linkTitle.size() <= 80
+        && isValidHttpUrl(data.linkUrl)
+        && isValidId(data.reporterId)
+        && reportId == (data.reporterId + '_' + data.linkId)
+        && data.reporterUsername is string && data.reporterUsername.size() >= 2 && data.reporterUsername.size() <= 32
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 240
+        && data.status is string && data.status in ['open', 'resolved', 'dismissed']
+        && (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 240))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidModerationLog(data) {
+      return data.keys().hasAll([
+          'linkId',
+          'linkTitle',
+          'targetOwnerId',
+          'action',
+          'reason',
+          'adminUid',
+          'adminEmail',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'linkId',
+          'linkTitle',
+          'targetOwnerId',
+          'action',
+          'reason',
+          'adminUid',
+          'adminEmail',
+          'createdAt'
+        ])
+        && isValidId(data.linkId)
+        && data.linkTitle is string && data.linkTitle.size() >= 1 && data.linkTitle.size() <= 80
+        && isValidId(data.targetOwnerId)
+        && data.action is string && data.action in ['approve', 'reject', 'remove', 'resolve_report', 'dismiss_report']
+        && data.reason is string && data.reason.size() <= 240
+        && isValidId(data.adminUid) && data.adminUid == request.auth.uid
+        && data.adminEmail is string && data.adminEmail.size() >= 3 && data.adminEmail.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTransactionId(val) {
+      return val is string
+        && val.size() >= 6
+        && val.size() <= 40
+        && val.matches('^[A-Z0-9_\\-]+$');
+    }
+
+    function isValidScreenshotUrl(val) {
+      return val is string
+        && val.size() >= 30
+        && val.size() <= 260000
+        && (
+          val.matches('^https://firebasestorage\\.googleapis\\.com/[^\\s]+$')
+          || val.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$')
+        );
+    }
+
+    function isValidPaymentRequest(data, requestId) {
+      return data.keys().hasAll([
+          'id',
+          'uid',
+          'userName',
+          'userUsername',
+          'planId',
+          'amountBdt',
+          'paymentMethod',
+          'paymentNumber',
+          'transactionId',
+          'screenshotUrl',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'uid',
+          'userName',
+          'userUsername',
+          'planId',
+          'amountBdt',
+          'paymentMethod',
+          'paymentNumber',
+          'senderNumber',
+          'transactionId',
+          'screenshotUrl',
+          'status',
+          'adminNote',
+          'reviewedBy',
+          'reviewedByEmail',
+          'reviewedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == requestId
+        && isValidId(data.uid)
+        && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 50
+        && data.userUsername is string && data.userUsername.size() >= 2 && data.userUsername.size() <= 32
+        && data.planId is string && data.planId == 'multi_5'
+        && data.amountBdt is int && data.amountBdt == 50
+        && data.paymentMethod is string && data.paymentMethod in ['bkash', 'nagad']
+        && data.paymentNumber is string && data.paymentNumber.size() >= 6 && data.paymentNumber.size() <= 24
+        && (!('senderNumber' in data) || (data.senderNumber is string && data.senderNumber.size() <= 24))
+        && isValidTransactionId(data.transactionId)
+        && isValidScreenshotUrl(data.screenshotUrl)
+        && data.status is string && data.status in ['pending', 'approved', 'rejected']
+        && (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 240))
+        && (!('reviewedBy' in data) || isValidId(data.reviewedBy))
+        && (!('reviewedByEmail' in data) || (data.reviewedByEmail is string && data.reviewedByEmail.size() >= 3 && data.reviewedByEmail.size() <= 120))
+        && (!('reviewedAt' in data) || data.reviewedAt is timestamp)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMultiEntitlement(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'planId',
+          'active',
+          'maxConcurrentLinks',
+          'amountBdt',
+          'sourceRequestId',
+          'transactionId',
+          'approvedBy',
+          'approvedByEmail',
+          'activatedAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'planId',
+          'active',
+          'maxConcurrentLinks',
+          'amountBdt',
+          'sourceRequestId',
+          'transactionId',
+          'approvedBy',
+          'approvedByEmail',
+          'activatedAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid) && data.uid == userId
+        && data.planId is string && data.planId == 'multi_5'
+        && data.active is bool && data.active == true
+        && data.maxConcurrentLinks is int && data.maxConcurrentLinks == 5
+        && data.amountBdt is int && data.amountBdt == 50
+        && isValidId(data.sourceRequestId)
+        && isValidTransactionId(data.transactionId)
+        && isValidId(data.approvedBy) && data.approvedBy == request.auth.uid
+        && data.approvedByEmail is string && data.approvedByEmail.lower() == 'yafrizvi1234@gmail.com'
+        && data.activatedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPaymentNumberString(val) {
+      return val is string
+        && val.size() >= 6
+        && val.size() <= 24
+        && val.matches('^[0-9+\\-\\s]{6,24}$');
+    }
+
+    function isValidPaymentConfig(data, configId) {
+      return data.keys().hasAll([
+          'id',
+          'bkashNumber',
+          'nagadNumber',
+          'updatedBy',
+          'updatedByEmail',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'bkashNumber',
+          'nagadNumber',
+          'updatedBy',
+          'updatedByEmail',
+          'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == configId && configId == 'multi_5'
+        && isValidPaymentNumberString(data.bkashNumber)
+        && isValidPaymentNumberString(data.nagadNumber)
+        && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && data.updatedByEmail is string && data.updatedByEmail.lower() == 'yafrizvi1234@gmail.com'
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdsterraIntegration(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'ownerUserId',
+          'connectionMode',
+          'status',
+          'publisherId',
+          'publisherLabel',
+          'smartlinkUrl',
+          'smartlinkTitle',
+          'hasApiKey',
+          'apiKeyHint',
+          'apiVerified',
+          'verifiedDomainsCount',
+          'verifiedPlacementsCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'ownerUserId',
+          'connectionMode',
+          'status',
+          'publisherId',
+          'publisherLabel',
+          'smartlinkUrl',
+          'smartlinkTitle',
+          'hasApiKey',
+          'apiKeyHint',
+          'apiVerified',
+          'verifiedDomainsCount',
+          'verifiedPlacementsCount',
+          'lastSyncedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid) && data.uid == request.auth.uid && data.uid == userId
+        && isValidId(data.ownerUserId) && data.ownerUserId == request.auth.uid && data.ownerUserId == userId
+        && data.connectionMode is string && data.connectionMode in ['manual_smartlink', 'official_api_key']
+        && data.status is string && data.status in ['disconnected', 'connected']
+        && data.publisherId is string && data.publisherId.size() <= 64
+        && data.publisherLabel is string && data.publisherLabel.size() <= 60
+        && data.smartlinkUrl is string && (data.smartlinkUrl == '' || isValidHttpUrl(data.smartlinkUrl))
+        && data.smartlinkTitle is string && data.smartlinkTitle.size() <= 80
+        && data.hasApiKey is bool
+        && data.apiKeyHint is string && data.apiKeyHint.size() <= 16
+        && data.apiVerified is bool
+        && data.verifiedDomainsCount is int && data.verifiedDomainsCount >= 0 && data.verifiedDomainsCount <= 1000
+        && data.verifiedPlacementsCount is int && data.verifiedPlacementsCount >= 0 && data.verifiedPlacementsCount <= 5000
+        && (!('lastSyncedAt' in data) || data.lastSyncedAt is timestamp)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserSmartlink(data, linkId) {
+      return data.keys().hasAll([
+          'id',
+          'ownerUserId',
+          'title',
+          'url',
+          'domain',
+          'category',
+          'isHttps',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'ownerUserId',
+          'title',
+          'url',
+          'domain',
+          'category',
+          'isHttps',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == linkId
+        && isValidId(data.ownerUserId) && data.ownerUserId == request.auth.uid
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && isValidHttpUrl(data.url)
+        && data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120
+        && data.category is string && data.category.size() >= 2 && data.category.size() <= 40
+        && data.isHttps is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Username Uniqueness Registry
+    match /usernames/{username} {
+      allow get: if isVerifiedUser() && isValidUsername(username);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidUsername(username)
+        && incoming().keys().hasAll(['uid', 'createdAt'])
+        && incoming().keys().hasOnly(['uid', 'createdAt'])
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && !exists(/databases/$(database)/documents/usernames/$(username));
+
+      allow update: if false;
+      allow delete: if isVerifiedUser() && isValidUsername(username) && existing().uid == request.auth.uid;
+    }
+
+    // Owner-Only User Workspace (Points & Visits cannot be arbitrarily edited by client)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidUserWorkspace(incoming(), userId)
+        && incoming().totalPoints == 0
+        && incoming().totalVisits == 0
+        && incoming().successfulVisits == 0
+        && incoming().visitedToday == 0
+        && incoming().unlockedShopIds.size() == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+        && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == request.auth.uid;
+
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidUserWorkspace(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Profile Edit
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'bio', 'photoURL', 'activeAccent', 'username', 'updatedAt'])
+            && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+            && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == request.auth.uid
+          )
+          ||
+          // Action 2: Verified Single Visit Completion
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalPoints', 'totalVisits', 'successfulVisits', 'visitedToday', 'lastActivityId', 'updatedAt'])
+            && ('lastActivityId' in incoming())
+            && incoming().totalVisits == existing().totalVisits + 1
+            && incoming().successfulVisits == existing().successfulVisits + 1
+            && incoming().visitedToday == existing().visitedToday + 1
+            && incoming().totalPoints > existing().totalPoints
+            && incoming().totalPoints <= existing().totalPoints + 35
+            && existsAfter(/databases/$(database)/documents/activities/$(incoming().lastActivityId))
+            && getAfter(/databases/$(database)/documents/activities/$(incoming().lastActivityId)).data.uid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/activities/$(incoming().lastActivityId)).data.type == 'visit'
+            && getAfter(/databases/$(database)/documents/activities/$(incoming().lastActivityId)).data.pointsDelta == (incoming().totalPoints - existing().totalPoints)
+          )
+          ||
+          // Action 3: Shop Accent / Badge Unlock
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['unlockedShopIds', 'activeAccent', 'updatedAt'])
+            && incoming().unlockedShopIds.size() <= existing().unlockedShopIds.size() + 1
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Public Creator Profiles (Zero PII, bounded stats sync)
+    match /publicProfiles/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser();
+      allow list: if isVerifiedUser() && resource.data.isDiscoverable == true;
+
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().totalPoints == 0
+        && incoming().totalVisits == 0
+        && incoming().followersCount == 0
+        && incoming().followingCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+        && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == request.auth.uid;
+
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'bio', 'photoURL', 'specialty', 'activeAccent', 'username', 'isDiscoverable', 'updatedAt'])
+            && existsAfter(/databases/$(database)/documents/usernames/$(incoming().username))
+            && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == request.auth.uid
+          )
+          ||
+          (
+            isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['totalPoints', 'totalVisits', 'updatedAt'])
+            && incoming().totalVisits == existing().totalVisits + 1
+            && incoming().totalPoints > existing().totalPoints
+            && incoming().totalPoints <= existing().totalPoints + 35
+            && getAfter(/databases/$(database)/documents/users/$(userId)).data.totalPoints == incoming().totalPoints
+            && getAfter(/databases/$(database)/documents/users/$(userId)).data.totalVisits == incoming().totalVisits
+          )
+          ||
+          (
+            isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['followingCount', 'updatedAt'])
+            && (incoming().followingCount == existing().followingCount + 1 || incoming().followingCount == existing().followingCount - 1)
+          )
+          ||
+          (
+            !isOwner(userId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['followersCount', 'updatedAt'])
+            && (
+              (
+                incoming().followersCount == existing().followersCount + 1
+                && !exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + userId))
+                && existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + userId))
+              )
+              ||
+              (
+                incoming().followersCount == existing().followersCount - 1
+                && exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + userId))
+                && !existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + userId))
+              )
+            )
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Deterministic Follow Graph (No duplicate follows possible)
+    match /follows/{followId} {
+      allow get: if isValidId(followId)
+        && isVerifiedUser()
+        && (resource == null || existing().followerId == request.auth.uid || existing().targetId == request.auth.uid);
+      allow list: if isVerifiedUser() && (resource.data.followerId == request.auth.uid || resource.data.targetId == request.auth.uid);
+
+      allow create: if isValidId(followId)
+        && isVerifiedUser()
+        && isValidFollow(incoming(), followId)
+        && incoming().createdAt == request.time
+        && !exists(/databases/$(database)/documents/follows/$(followId));
+
+      allow update: if false;
+      allow delete: if isValidId(followId) && isVerifiedUser() && existing().followerId == request.auth.uid;
+    }
+
+    // Immutable User Activity Ledger
+    match /activities/{activityId} {
+      allow get: if isValidId(activityId) && isVerifiedUser() && existing().uid == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.uid == request.auth.uid;
+
+      allow create: if isValidId(activityId)
+        && isVerifiedUser()
+        && isValidActivity(incoming())
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // Admin Collection Strictly Locked (Email-Based Auth Only — No UID Admin Docs)
+    match /admins/{docId} {
+      allow read, write: if false;
+    }
+
+    // Canonical URL Hash Registry (Prevents Duplicate Link Submissions)
+    match /linkRegistry/{urlKey} {
+      allow get: if isValidId(urlKey) && isVerifiedUser();
+      allow list: if false;
+
+      allow create: if isValidId(urlKey)
+        && urlKey.size() >= 8 && urlKey.size() <= 96
+        && isVerifiedUser()
+        && incoming().keys().hasAll(['linkId', 'ownerId', 'normalizedUrl', 'createdAt'])
+        && incoming().keys().hasOnly(['linkId', 'ownerId', 'normalizedUrl', 'createdAt'])
+        && isValidId(incoming().linkId)
+        && isValidId(incoming().ownerId)
+        && incoming().ownerId == request.auth.uid
+        && isValidHttpUrl(incoming().normalizedUrl)
+        && incoming().createdAt == request.time
+        && !exists(/databases/$(database)/documents/linkRegistry/$(urlKey))
+        && existsAfter(/databases/$(database)/documents/links/$(incoming().linkId))
+        && getAfter(/databases/$(database)/documents/links/$(incoming().linkId)).data.urlKey == urlKey
+        && getAfter(/databases/$(database)/documents/links/$(incoming().linkId)).data.ownerId == request.auth.uid;
+
+      allow update: if false;
+
+      allow delete: if isValidId(urlKey)
+        && isVerifiedUser()
+        && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // Managed Smartlinks & Website Links
+    match /links/{linkId} {
+      allow get: if isValidId(linkId)
+        && isVerifiedUser()
+        && (
+          isAdmin()
+          || (
+            resource != null
+            && (
+              existing().status == 'approved'
+              || (existing().type == 'smartlink' && existing().status != 'rejected')
+              || existing().ownerId == request.auth.uid
+            )
+          )
+        );
+
+      allow list: if isVerifiedUser()
+        && (
+          resource.data.status == 'approved'
+          || resource.data.type == 'smartlink'
+          || resource.data.ownerId == request.auth.uid
+          || isAdmin()
+        );
+
+      allow create: if isValidId(linkId)
+        && isVerifiedUser()
+        && isValidManagedLink(incoming(), linkId)
+        && incoming().ownerId == request.auth.uid
+        && (
+          (incoming().type == 'smartlink' && incoming().status == 'approved')
+          || (incoming().type == 'website' && incoming().status == 'pending')
+        )
+        && incoming().reportCount == 0
+        && !('moderationNote' in incoming())
+        && !('moderatedBy' in incoming())
+        && !('moderatedAt' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/linkRegistry/$(incoming().urlKey))
+        && getAfter(/databases/$(database)/documents/linkRegistry/$(incoming().urlKey)).data.linkId == linkId;
+
+      allow update: if isValidId(linkId)
+        && isVerifiedUser()
+        && isValidManagedLink(incoming(), linkId)
+        && (!('id' in existing()) || incoming().id == existing().id)
+        && incoming().ownerId == existing().ownerId
+        && (!('createdAt' in existing()) || !(existing().createdAt is timestamp) || incoming().createdAt == existing().createdAt)
+        && incoming().updatedAt == request.time
+        && (
+          // Action 3: Verified Admin Email moderation (Approve, Reject, Clear Reports, or normalize legacy schema)
+          (
+            isAdmin()
+            && incoming().moderatedBy == request.auth.uid
+            && incoming().moderatedAt == request.time
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id',
+              'ownerName',
+              'ownerUsername',
+              'ownerAvatar',
+              'type',
+              'title',
+              'description',
+              'url',
+              'normalizedUrl',
+              'urlKey',
+              'domain',
+              'isHttps',
+              'category',
+              'cooldownSec',
+              'reportCount',
+              'status',
+              'moderationNote',
+              'moderatedBy',
+              'moderatedAt',
+              'createdAt',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
+              'id',
+              'ownerName',
+              'ownerUsername',
+              'ownerAvatar',
+              'type',
+              'title',
+              'description',
+              'url',
+              'normalizedUrl',
+              'urlKey',
+              'domain',
+              'isHttps',
+              'category',
+              'cooldownSec',
+              'reportCount',
+              'status',
+              'moderationNote',
+              'moderatedBy',
+              'moderatedAt',
+              'createdAt',
+              'updatedAt'
+            ])
+          )
+          ||
+          // Action 1: Owner edits their link (Smartlinks stay live; Websites re-enter review)
+          (
+            existing().ownerId == request.auth.uid
+            && (
+              (incoming().type == 'smartlink' && incoming().status == 'approved')
+              || (incoming().type == 'website' && incoming().status == 'pending')
+            )
+            && ((!('reportCount' in existing()) && incoming().reportCount == 0) || incoming().reportCount == existing().reportCount)
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'id',
+              'ownerName',
+              'ownerUsername',
+              'ownerAvatar',
+              'type',
+              'title',
+              'description',
+              'url',
+              'normalizedUrl',
+              'urlKey',
+              'domain',
+              'isHttps',
+              'category',
+              'cooldownSec',
+              'reportCount',
+              'status',
+              'createdAt',
+              'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
+              'id',
+              'ownerName',
+              'ownerUsername',
+              'ownerAvatar',
+              'type',
+              'title',
+              'description',
+              'url',
+              'normalizedUrl',
+              'urlKey',
+              'domain',
+              'isHttps',
+              'category',
+              'cooldownSec',
+              'status',
+              'createdAt',
+              'updatedAt'
+            ])
+            && existsAfter(/databases/$(database)/documents/linkRegistry/$(incoming().urlKey))
+            && getAfter(/databases/$(database)/documents/linkRegistry/$(incoming().urlKey)).data.linkId == linkId
+          )
+          ||
+          // Action 2: Verified user reports a live link (paired atomically with /linkReports)
+          (
+            (
+              existing().status == 'approved'
+              || (existing().type == 'smartlink' && existing().status != 'rejected')
+            )
+            && incoming().status == existing().status
+            && incoming().reportCount == existing().reportCount + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['reportCount', 'updatedAt'])
+            && existsAfter(/databases/$(database)/documents/linkReports/$(request.auth.uid + '_' + linkId))
+          )
+        );
+
+      allow delete: if isValidId(linkId)
+        && isVerifiedUser()
+        && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
+    // External Link Opening History (Spam-Prevention Cooldown & Log Only — Zero Points)
+    match /linkVisits/{visitId} {
+      allow get: if isValidId(visitId) && isVerifiedUser() && existing().uid == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.uid == request.auth.uid;
+
+      allow create: if isValidId(visitId)
+        && isVerifiedUser()
+        && isValidLinkVisit(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/links/$(incoming().linkId))
+        && (
+          get(/databases/$(database)/documents/links/$(incoming().linkId)).data.status == 'approved'
+          || (
+            get(/databases/$(database)/documents/links/$(incoming().linkId)).data.type == 'smartlink'
+            && get(/databases/$(database)/documents/links/$(incoming().linkId)).data.status != 'rejected'
+          )
+        );
+
+      allow update, delete: if false;
+    }
+
+    // Reported Links Queue
+    match /linkReports/{reportId} {
+      allow get: if isValidId(reportId)
+        && isVerifiedUser()
+        && (isAdmin() || (resource != null && existing().reporterId == request.auth.uid));
+
+      allow list: if isVerifiedUser()
+        && (resource.data.reporterId == request.auth.uid || isAdmin());
+
+      allow create: if isValidId(reportId)
+        && isVerifiedUser()
+        && isValidLinkReport(incoming(), reportId)
+        && incoming().reporterId == request.auth.uid
+        && incoming().status == 'open'
+        && !('adminNote' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && !exists(/databases/$(database)/documents/linkReports/$(reportId))
+        && exists(/databases/$(database)/documents/links/$(incoming().linkId));
+
+      allow update: if isValidId(reportId)
+        && isAdmin()
+        && isValidLinkReport(incoming(), reportId)
+        && incoming().linkId == existing().linkId
+        && incoming().reporterId == existing().reporterId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'updatedAt']);
+
+      allow delete: if isValidId(reportId) && isAdmin();
+    }
+
+    // Admin Moderation Audit Logs (Strictly Verified Admin Email Only)
+    match /moderationLogs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
+
+      allow create: if isValidId(logId)
+        && isAdmin()
+        && isValidModerationLog(incoming())
+        && incoming().adminUid == request.auth.uid
+        && incoming().adminEmail.lower() == 'yafrizvi1234@gmail.com'
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // Immutable Transaction ID Uniqueness Lock (Prevents Duplicate TxID Claims)
+    match /paymentTransactions/{txKey} {
+      allow get: if isValidId(txKey) && isValidTransactionId(txKey) && isVerifiedUser();
+      allow list: if false;
+
+      allow create: if isValidId(txKey)
+        && isValidTransactionId(txKey)
+        && isVerifiedUser()
+        && incoming().keys().hasAll(['requestId', 'createdAt'])
+        && incoming().keys().hasOnly(['requestId', 'createdAt'])
+        && isValidId(incoming().requestId)
+        && incoming().createdAt == request.time
+        && !exists(/databases/$(database)/documents/paymentTransactions/$(txKey))
+        && existsAfter(/databases/$(database)/documents/paymentRequests/$(incoming().requestId))
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().requestId)).data.transactionId == txKey
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().requestId)).data.uid == request.auth.uid;
+
+      allow update, delete: if false;
+    }
+
+    // Multi (5) 50 BDT Payment Requests (Owner Submit + Verified Admin Review Only)
+    match /paymentRequests/{requestId} {
+      allow get: if isValidId(requestId)
+        && isVerifiedUser()
+        && (isAdmin() || (resource != null && existing().uid == request.auth.uid));
+
+      allow list: if isVerifiedUser()
+        && (resource.data.uid == request.auth.uid || isAdmin());
+
+      allow create: if isValidId(requestId)
+        && isVerifiedUser()
+        && isValidPaymentRequest(incoming(), requestId)
+        && incoming().uid == request.auth.uid
+        && incoming().status == 'pending'
+        && !('adminNote' in incoming())
+        && !('reviewedBy' in incoming())
+        && !('reviewedByEmail' in incoming())
+        && !('reviewedAt' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && !exists(/databases/$(database)/documents/multiEntitlements/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/paymentTransactions/$(incoming().transactionId))
+        && getAfter(/databases/$(database)/documents/paymentTransactions/$(incoming().transactionId)).data.requestId == requestId;
+
+      allow update: if isValidId(requestId)
+        && isAdmin()
+        && isValidPaymentRequest(incoming(), requestId)
+        && existing().status == 'pending'
+        && incoming().status in ['approved', 'rejected']
+        && incoming().id == existing().id
+        && incoming().uid == existing().uid
+        && incoming().planId == existing().planId
+        && incoming().amountBdt == existing().amountBdt
+        && incoming().transactionId == existing().transactionId
+        && incoming().screenshotUrl == existing().screenshotUrl
+        && incoming().createdAt == existing().createdAt
+        && incoming().reviewedBy == request.auth.uid
+        && ('reviewedByEmail' in incoming())
+        && incoming().reviewedByEmail.lower() == 'yafrizvi1234@gmail.com'
+        && ('reviewedAt' in incoming())
+        && incoming().reviewedAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status',
+          'adminNote',
+          'reviewedBy',
+          'reviewedByEmail',
+          'reviewedAt',
+          'updatedAt'
+        ])
+        && (
+          incoming().status == 'rejected'
+          || (
+            incoming().status == 'approved'
+            && existsAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid))
+            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.uid == existing().uid
+            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.active == true
+            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.sourceRequestId == requestId
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Verified Multi (5) Entitlements (Strictly Admin-Activated Linked to Approved Payment)
+    match /multiEntitlements/{userId} {
+      allow get: if isValidId(userId)
+        && isVerifiedUser()
+        && (isOwner(userId) || isAdmin());
+
+      allow list: if isAdmin();
+
+      allow create: if isValidId(userId)
+        && isAdmin()
+        && isValidMultiEntitlement(incoming(), userId)
+        && incoming().activatedAt == request.time
+        && incoming().updatedAt == request.time
+        && !exists(/databases/$(database)/documents/multiEntitlements/$(userId))
+        && existsAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId))
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.uid == userId
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.status == 'approved'
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.planId == 'multi_5'
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.amountBdt == 50
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.transactionId == incoming().transactionId;
+
+      allow update, delete: if false;
+    }
+
+    // Admin-Managed bKash & Nagad Personal Payment Numbers (Readable by Verified Users, Writable Only by Admin)
+    match /paymentConfig/{configId} {
+      allow get: if isValidId(configId) && configId == 'multi_5' && isVerifiedUser();
+      allow list: if false;
+
+      allow create, update: if isValidId(configId)
+        && configId == 'multi_5'
+        && isAdmin()
+        && isValidPaymentConfig(incoming(), configId)
+        && incoming().updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    // Strictly Owner-Isolated Individual Adsterra Integration (No Admin or Cross-User Access)
+    match /adsterraIntegrations/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidAdsterraIntegration(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidAdsterraIntegration(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().ownerUserId == existing().ownerUserId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+    }
+
+    // Strictly Owner-Isolated Personal Smartlinks (No Admin or Cross-User Mixing)
+    match /userSmartlinks/{linkId} {
+      allow get: if isValidId(linkId)
+        && isVerifiedUser()
+        && resource != null
+        && existing().ownerUserId == request.auth.uid;
+
+      allow list: if isVerifiedUser() && resource.data.ownerUserId == request.auth.uid;
+
+      allow create: if isValidId(linkId)
+        && isVerifiedUser()
+        && isValidUserSmartlink(incoming(), linkId)
+        && incoming().ownerUserId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(linkId)
+        && isVerifiedUser()
+        && existing().ownerUserId == request.auth.uid
+        && isValidUserSmartlink(incoming(), linkId)
+        && incoming().id == existing().id
+        && incoming().ownerUserId == existing().ownerUserId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isValidId(linkId)
+        && isVerifiedUser()
+        && existing().ownerUserId == request.auth.uid;
+    }
+  }
+}

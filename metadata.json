@@ -1,0 +1,6 @@
+{
+  "name": "INFINITY REWARDS",
+  "description": "INFINITY REWARDS by Infinity Studio — Modern dark navy glassmorphism mobile-first rewards platform dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

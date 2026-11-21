@@ -1,0 +1,30 @@
+/**
+ * Phase 4 Email-Based Admin & Firestore Security Rules Verification Checklist.
+ */
+export const ADMIN_AND_PHASE_4_SECURITY_TESTS = [
+  { id: 1, description: 'Verified admin email (yafrizvi1234@gmail.com, case-insensitive) gets admin access', expected: 'ALLOW' },
+  { id: 2, description: 'Other verified email (other@example.com, email_verified=true) denied admin access', expected: 'PERMISSION_DENIED' },
+  { id: 3, description: 'Unverified admin email (yafrizvi1234@gmail.com, email_verified=false) denied admin access', expected: 'PERMISSION_DENIED' },
+  { id: 4, description: 'Regular user writing /admins/{uid} or injecting role/isAdmin into /users or /publicProfiles', expected: 'PERMISSION_DENIED' },
+  { id: 5, description: 'Regular user reading, listing, or modifying /admins collection', expected: 'PERMISSION_DENIED' },
+  { id: 6, description: 'Regular user approving or rejecting own or another user /links/{id}', expected: 'PERMISSION_DENIED' },
+  { id: 7, description: 'Verified admin approving, rejecting, removing links, resolving reports, and writing /moderationLogs', expected: 'ALLOW' },
+  { id: 8, description: 'Verified non-admin reading own /users/{uid}, editing own profile, submitting pending links, editing/deleting own links', expected: 'ALLOW' },
+  { id: 9, description: 'Cross-user update or delete on another user /links/{id} or /linkRegistry/{urlKey}', expected: 'PERMISSION_DENIED' },
+  { id: 10, description: 'Non-admin listing or reading unapproved links owned by another user', expected: 'PERMISSION_DENIED' },
+  { id: 11, description: 'Non-admin reading/writing /moderationLogs or resolving/dismissing /linkReports', expected: 'PERMISSION_DENIED' },
+  { id: 12, description: 'Unauthenticated read/write on any collection', expected: 'PERMISSION_DENIED' },
+  { id: 13, description: 'User submitting 50 BDT Multi (5) payment request in pending status with unique Transaction ID & screenshot', expected: 'ALLOW' },
+  { id: 14, description: 'Reusing an existing Transaction ID (including case-insensitive duplicate) in /paymentTransactions or /paymentRequests', expected: 'PERMISSION_DENIED' },
+  { id: 15, description: 'User directly creating or updating /multiEntitlements/{uid} or setting /paymentRequests.status=approved', expected: 'PERMISSION_DENIED' },
+  { id: 16, description: 'Non-admin approving/rejecting /paymentRequests or reading another user payment request/screenshot', expected: 'PERMISSION_DENIED' },
+  { id: 17, description: 'Admin approving pending payment request and activating /multiEntitlements/{applicantUid} atomically', expected: 'ALLOW' },
+  { id: 18, description: 'Activating /multiEntitlements/{otherUid} using applicantUid payment request (wrong account)', expected: 'PERMISSION_DENIED' },
+  { id: 19, description: 'Non-admin or unverified user writing /paymentConfig/multi_5 payment numbers', expected: 'PERMISSION_DENIED' },
+  { id: 20, description: 'Verified admin updating /paymentConfig/multi_5 bKash and Nagad numbers and verified user reading /paymentConfig/multi_5', expected: 'ALLOW' },
+  { id: 21, description: 'User B or Admin reading, listing, or modifying User A /adsterraIntegrations/{userA}', expected: 'PERMISSION_DENIED' },
+  { id: 22, description: 'User A injecting raw apiKey/secret field into /adsterraIntegrations/{userA}', expected: 'PERMISSION_DENIED' },
+  { id: 23, description: 'User B or Admin reading, listing, modifying, or deleting User A /userSmartlinks/{linkId}', expected: 'PERMISSION_DENIED' },
+  { id: 24, description: 'User A creating /userSmartlinks/{linkId} with spoofed ownerUserId != auth.uid', expected: 'PERMISSION_DENIED' },
+  { id: 25, description: 'Verified User A managing own /adsterraIntegrations/{userA} and /userSmartlinks/{linkId}', expected: 'ALLOW' },
+] as const;
