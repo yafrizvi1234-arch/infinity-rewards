@@ -485,11 +485,19 @@ export async function toggleFollowSecure(params: {
 
   const followId = `${params.followerUid}_${params.targetId}`;
   const followRef = doc(db, 'follows', followId);
+  const followerPublicRef = doc(db, 'publicProfiles', params.followerUid);
+  const targetPublicRef = doc(db, 'publicProfiles', params.targetId);
 
-  // Double-check live existence to prevent duplicate follows
+  // Double-check live existence & counter state to stay strictly within Firestore rules
   let existsSnap;
+  let followerPublicSnap;
+  let targetPublicSnap = null;
   try {
-    existsSnap = await getDoc(followRef);
+    [existsSnap, followerPublicSnap, targetPublicSnap] = await Promise.all([
+      getDoc(followRef),
+      getDoc(followerPublicRef),
+      params.targetIsRealUser ? getDoc(targetPublicRef) : Promise.resolve(null),
+    ]);
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `follows/${followId}`);
   }
@@ -501,6 +509,24 @@ export async function toggleFollowSecure(params: {
   if (params.currentlyFollowing && !alreadyExists) {
     return;
   }
+
+  const followerData = followerPublicSnap.exists() ? followerPublicSnap.data() : null;
+  const liveFollowingCount =
+    followerData &&
+    typeof followerData.followingCount === 'number' &&
+    Number.isInteger(followerData.followingCount) &&
+    followerData.followingCount >= 0
+      ? followerData.followingCount
+      : Math.max(0, Math.floor(params.followerCurrentFollowingCount));
+
+  const targetData = targetPublicSnap && targetPublicSnap.exists() ? targetPublicSnap.data() : null;
+  const liveFollowersCount =
+    targetData &&
+    typeof targetData.followersCount === 'number' &&
+    Number.isInteger(targetData.followersCount) &&
+    targetData.followersCount >= 0
+      ? targetData.followersCount
+      : Math.max(0, Math.floor(params.targetCurrentFollowersCount ?? 0));
 
   const batch = writeBatch(db);
   const activityRef = doc(collection(db, 'activities'));
@@ -530,14 +556,16 @@ export async function toggleFollowSecure(params: {
       createdAt: serverTimestamp(),
     });
 
-    batch.update(doc(db, 'publicProfiles', params.followerUid), {
-      followingCount: params.followerCurrentFollowingCount + 1,
-      updatedAt: serverTimestamp(),
-    });
+    if (followerPublicSnap.exists() && liveFollowingCount < 1000000) {
+      batch.update(followerPublicRef, {
+        followingCount: liveFollowingCount + 1,
+        updatedAt: serverTimestamp(),
+      });
+    }
 
-    if (params.targetIsRealUser && typeof params.targetCurrentFollowersCount === 'number') {
-      batch.update(doc(db, 'publicProfiles', params.targetId), {
-        followersCount: params.targetCurrentFollowersCount + 1,
+    if (params.targetIsRealUser && targetPublicSnap?.exists() && liveFollowersCount < 1000000) {
+      batch.update(targetPublicRef, {
+        followersCount: liveFollowersCount + 1,
         updatedAt: serverTimestamp(),
       });
     }
@@ -555,14 +583,16 @@ export async function toggleFollowSecure(params: {
       createdAt: serverTimestamp(),
     });
 
-    batch.update(doc(db, 'publicProfiles', params.followerUid), {
-      followingCount: Math.max(0, params.followerCurrentFollowingCount - 1),
-      updatedAt: serverTimestamp(),
-    });
+    if (followerPublicSnap.exists() && liveFollowingCount > 0) {
+      batch.update(followerPublicRef, {
+        followingCount: liveFollowingCount - 1,
+        updatedAt: serverTimestamp(),
+      });
+    }
 
-    if (params.targetIsRealUser && typeof params.targetCurrentFollowersCount === 'number') {
-      batch.update(doc(db, 'publicProfiles', params.targetId), {
-        followersCount: Math.max(0, params.targetCurrentFollowersCount - 1),
+    if (params.targetIsRealUser && targetPublicSnap?.exists() && liveFollowersCount > 0) {
+      batch.update(targetPublicRef, {
+        followersCount: liveFollowersCount - 1,
         updatedAt: serverTimestamp(),
       });
     }

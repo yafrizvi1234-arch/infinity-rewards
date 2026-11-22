@@ -30,6 +30,7 @@ interface BottomVisitDockProps {
   isOpen: boolean;
   links: AutoVisitQueueItem[];
   initialLinkId?: string | null;
+  preferredBatchIds?: string[];
   sessionNonce: number;
   isMulti5Active: boolean;
   visitMode: VisitMode;
@@ -86,6 +87,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   isOpen,
   links,
   initialLinkId,
+  preferredBatchIds,
   sessionNonce,
   isMulti5Active,
   visitMode,
@@ -109,6 +111,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   const [celebrationBurst, setCelebrationBurst] = useState<CelebrationBurst | null>(null);
 
   const cursorRef = useRef(0);
+  const remainingSecRef = useRef(CYCLE_DURATION_SEC);
   const localHoldUntilRef = useRef<Record<string, number>>({});
   const completingCycleRef = useRef(false);
   const sessionTokenRef = useRef(0);
@@ -157,6 +160,9 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   const onCompleteLinkVisitRef = useRef(onCompleteLinkVisit);
   onCompleteLinkVisitRef.current = onCompleteLinkVisit;
 
+  const preferredBatchIdsRef = useRef(preferredBatchIds);
+  preferredBatchIdsRef.current = preferredBatchIds;
+
   const linksById = useMemo(() => {
     const map = new Map<string, AutoVisitQueueItem>();
     for (const item of links) {
@@ -170,7 +176,11 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   }, []);
 
   const pickNextBatch = useCallback(
-    (preferredFirstId?: string | null, limitOverride?: number): string[] => {
+    (
+      preferredFirstId?: string | null,
+      limitOverride?: number,
+      preferredIds?: string[] | null
+    ): string[] => {
       const pool = linksRef.current;
       if (pool.length === 0) return [];
 
@@ -193,6 +203,18 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           picked.push(preferred);
           usedIds.add(preferred.id);
           startIdx = (preferredReadyIdx + 1) % ready.length;
+        }
+      }
+
+      if (preferredIds && preferredIds.length > 0 && picked.length < limit) {
+        for (const prefId of preferredIds) {
+          if (picked.length >= limit) break;
+          if (usedIds.has(prefId)) continue;
+          const candidate = ready.find((item) => item.id === prefId);
+          if (candidate) {
+            picked.push(candidate);
+            usedIds.add(candidate.id);
+          }
         }
       }
 
@@ -221,6 +243,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       setSlotStates({});
       setIsProcessingBatch(false);
       setIsPaused(false);
+      remainingSecRef.current = CYCLE_DURATION_SEC;
       setRemainingSec(CYCLE_DURATION_SEC);
       completingCycleRef.current = false;
       return;
@@ -231,9 +254,14 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     completingCycleRef.current = false;
     setIsPaused(false);
     setIsProcessingBatch(false);
+    remainingSecRef.current = CYCLE_DURATION_SEC;
     setRemainingSec(CYCLE_DURATION_SEC);
 
-    const initialBatch = pickNextBatch(initialLinkId, concurrencyLimit);
+    const initialBatch = pickNextBatch(
+      initialLinkId,
+      concurrencyLimit,
+      preferredBatchIdsRef.current
+    );
     setActiveBatchIds(initialBatch);
     const initStates: Record<string, SlotVisitState> = {};
     for (const id of initialBatch) {
@@ -375,6 +403,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           nextStates[id] = 'visiting';
         }
         setSlotStates(nextStates);
+        remainingSecRef.current = CYCLE_DURATION_SEC;
         setRemainingSec(CYCLE_DURATION_SEC);
       } finally {
         if (sessionTokenRef.current === activeSessionToken) {
@@ -399,6 +428,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         nextStates[id] = 'visiting';
       }
       setSlotStates(nextStates);
+      remainingSecRef.current = CYCLE_DURATION_SEC;
       setRemainingSec(CYCLE_DURATION_SEC);
     }
   }, [activeItems.length, concurrencyLimit, isOpen, isPaused, isProcessingBatch, links.length, nowMs, pickNextBatch]);
@@ -411,13 +441,14 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     if (!isOpen || isPaused || isProcessingBatch || activeItems.length === 0) return;
 
     const timer = window.setInterval(() => {
-      setRemainingSec((prev) => {
-        if (prev <= 1) {
-          void executeConcurrentBatchRef.current(true);
-          return CYCLE_DURATION_SEC;
-        }
-        return prev - 1;
-      });
+      if (remainingSecRef.current <= 1) {
+        remainingSecRef.current = CYCLE_DURATION_SEC;
+        setRemainingSec(CYCLE_DURATION_SEC);
+        void executeConcurrentBatchRef.current(true);
+        return;
+      }
+      remainingSecRef.current -= 1;
+      setRemainingSec(remainingSecRef.current);
     }, 1000);
 
     return () => window.clearInterval(timer);

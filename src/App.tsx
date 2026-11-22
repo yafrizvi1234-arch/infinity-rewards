@@ -240,6 +240,7 @@ export default function App() {
   const [autoVisitSession, setAutoVisitSession] = useState<{
     active: boolean;
     startId?: string | null;
+    preferredBatchIds?: string[];
     nonce: number;
   } | null>(null);
   const [isProModalOpen, setIsProModalOpen] = useState(false);
@@ -256,6 +257,24 @@ export default function App() {
   const lastIdentityKeyRef = useRef<string | null>(null);
   const visitStatsQueueRef = useRef<Promise<void>>(Promise.resolve());
   const autoEnabledMultiRef = useRef(false);
+  const latestWorkspaceRef = useRef({
+    demoPoints: state.demoPoints,
+    totalVisits: state.totalVisits,
+    successfulVisits: state.successfulVisits,
+    visitedToday: state.visitedToday,
+    displayName: state.profile.displayName,
+    username: state.profile.username,
+    avatar: state.profile.avatar,
+  });
+  latestWorkspaceRef.current = {
+    demoPoints: state.demoPoints,
+    totalVisits: state.totalVisits,
+    successfulVisits: state.successfulVisits,
+    visitedToday: state.visitedToday,
+    displayName: state.profile.displayName,
+    username: state.profile.username,
+    avatar: state.profile.avatar,
+  };
 
   const clearAdminSessionState = useCallback(() => {
     adminCheckSeqRef.current += 1;
@@ -819,6 +838,7 @@ export default function App() {
       const statTask = visitStatsQueueRef.current
         .catch(() => undefined)
         .then(async () => {
+          const snapshot = latestWorkspaceRef.current;
           try {
             await recordVerifiedVisit({
               uid: authUser.uid,
@@ -827,9 +847,9 @@ export default function App() {
                 type: item.type,
                 title: item.title,
                 userId: item.managedLink?.ownerId ?? authUser.uid,
-                userName: item.managedLink?.ownerName ?? state.profile.displayName,
-                userHandle: item.managedLink?.ownerUsername ?? `@${state.profile.username}`,
-                userAvatar: item.managedLink?.ownerAvatar ?? state.profile.avatar,
+                userName: item.managedLink?.ownerName ?? snapshot.displayName,
+                userHandle: item.managedLink?.ownerUsername ?? `@${snapshot.username}`,
+                userAvatar: item.managedLink?.ownerAvatar ?? snapshot.avatar,
                 category: item.category,
                 durationSec: 8,
                 demoPoints: 10,
@@ -837,11 +857,18 @@ export default function App() {
                 previewSummary: '',
                 destinationDomain: item.domain,
               },
-              currentTotalPoints: state.demoPoints,
-              currentTotalVisits: state.totalVisits,
-              currentSuccessfulVisits: state.successfulVisits,
-              currentVisitedToday: state.visitedToday,
+              currentTotalPoints: snapshot.demoPoints,
+              currentTotalVisits: snapshot.totalVisits,
+              currentSuccessfulVisits: snapshot.successfulVisits,
+              currentVisitedToday: snapshot.visitedToday,
             });
+            latestWorkspaceRef.current = {
+              ...snapshot,
+              demoPoints: snapshot.demoPoints + 10,
+              totalVisits: snapshot.totalVisits + 1,
+              successfulVisits: snapshot.successfulVisits + 1,
+              visitedToday: snapshot.visitedToday + 1,
+            };
             setState((prev) => ({
               ...prev,
               demoPoints: prev.demoPoints + 10,
@@ -857,16 +884,7 @@ export default function App() {
       visitStatsQueueRef.current = statTask;
       await statTask;
     },
-    [
-      authUser,
-      state.demoPoints,
-      state.profile.avatar,
-      state.profile.displayName,
-      state.profile.username,
-      state.successfulVisits,
-      state.totalVisits,
-      state.visitedToday,
-    ]
+    [authUser]
   );
 
   const handleReportLink = async (link: ManagedLink, reason: string) => {
@@ -1140,9 +1158,10 @@ export default function App() {
     if (state.unlockedShopIds.includes(item.id) || state.demoPoints < item.demoCost) {
       return;
     }
-    const nextUnlocked = [...state.unlockedShopIds, item.id].slice(0, 20);
-    const nextAccent =
-      item.category === 'Theme' ? item.previewAccent : state.profile.activeAccent;
+    const prevUnlocked = state.unlockedShopIds;
+    const prevAccent = state.profile.activeAccent;
+    const nextUnlocked = [...prevUnlocked, item.id].slice(0, 20);
+    const nextAccent = item.category === 'Theme' ? item.previewAccent : prevAccent;
 
     setState((prev) => ({
       ...prev,
@@ -1161,12 +1180,21 @@ export default function App() {
       });
       setToastMessage(`Unlocked "${item.title}"`);
     } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        unlockedShopIds: prevUnlocked,
+        profile: {
+          ...prev.profile,
+          activeAccent: prevAccent,
+        },
+      }));
       setToastMessage(err instanceof Error ? err.message : 'Failed to unlock item.');
     }
   };
 
   const handleApplyAccent = async (accent: UserProfileData['activeAccent']) => {
     if (!authUser) return;
+    const prevAccent = state.profile.activeAccent;
     setState((prev) => ({
       ...prev,
       profile: { ...prev.profile, activeAccent: accent },
@@ -1179,6 +1207,10 @@ export default function App() {
       });
       setToastMessage(`Applied ${accent} profile frame`);
     } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        profile: { ...prev.profile, activeAccent: prevAccent },
+      }));
       setToastMessage(err instanceof Error ? err.message : 'Failed to update profile frame.');
     }
   };
@@ -1550,8 +1582,16 @@ export default function App() {
                   cooldowns={state.cooldowns}
                   isAdmin={isAdmin}
                   adminPendingCount={adminPendingCount}
-                  isAdsterraConnected={adsterraIntegration?.status === 'connected'}
-                  hasAdsterraApiKey={adsterraBackendStatus.hasApiKey || Boolean(adsterraIntegration?.hasApiKey)}
+                  isAdsterraConnected={
+                    adsterraBackendStatus.backendReachable
+                      ? adsterraBackendStatus.hasApiKey
+                      : adsterraIntegration?.status === 'connected'
+                  }
+                  hasAdsterraApiKey={
+                    adsterraBackendStatus.backendReachable
+                      ? adsterraBackendStatus.hasApiKey
+                      : Boolean(adsterraIntegration?.hasApiKey)
+                  }
                   adsterraPlacements={adsterraBackendStatus.placementsPreview}
                   personalSmartlinks={personalSmartlinks}
                   primaryAdsterraSmartlink={
@@ -1574,10 +1614,11 @@ export default function App() {
                     setVisitMode(mode);
                   }}
                   onOpenProLocked={() => setIsProModalOpen(true)}
-                  onStartAutoVisit={(startId) =>
+                  onStartAutoVisit={(startId, preferredBatchIds) =>
                     setAutoVisitSession((prev) => ({
                       active: true,
                       startId: startId ?? null,
+                      preferredBatchIds,
                       nonce: (prev?.nonce ?? 0) + 1,
                     }))
                   }
@@ -1784,6 +1825,7 @@ export default function App() {
         isOpen={Boolean(autoVisitSession?.active)}
         links={activeDockLinks}
         initialLinkId={autoVisitSession?.startId}
+        preferredBatchIds={autoVisitSession?.preferredBatchIds}
         sessionNonce={autoVisitSession?.nonce ?? 0}
         isMulti5Active={isMulti5Active}
         visitMode={visitMode}

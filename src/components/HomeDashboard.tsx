@@ -74,7 +74,7 @@ interface HomeDashboardProps {
   onChangeVisitTab: (tab: VisitTab) => void;
   onChangeVisitMode: (mode: VisitMode) => void;
   onOpenProLocked: () => void;
-  onStartAutoVisit: (startId?: string) => void;
+  onStartAutoVisit: (startId?: string, preferredBatchIds?: string[]) => void;
   onReportLink?: (link: ManagedLink) => void;
   onNextQueue: () => void;
   onPrevQueue: () => void;
@@ -559,7 +559,12 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                 <>
                   <button
                     type="button"
-                    onClick={() => onStartAutoVisit(multiBatchLinks[0]?.id)}
+                    onClick={() =>
+                      onStartAutoVisit(
+                        multiBatchLinks[0]?.id,
+                        multiBatchLinks.map((l) => l.id)
+                      )
+                    }
                     className="neon-btn-primary flex min-h-[46px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-bold"
                   >
                     <Play className="h-4 w-4" />

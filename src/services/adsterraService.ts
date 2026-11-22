@@ -28,6 +28,7 @@ import {
 import { validateAndNormalizeUrl } from '../utils/urlValidator';
 
 export const DEFAULT_BACKEND_STATUS: AdsterraBackendStatus = {
+  backendReachable: false,
   hasApiKey: false,
   apiKeyHint: '',
   apiVerified: false,

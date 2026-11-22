@@ -245,7 +245,13 @@ export const LeaderboardScreen: React.FC<LeaderboardScreenProps> = ({
                       <p className="font-mono-num text-sm font-bold text-[#00F5FF]">
                         {entry.activeScore.toLocaleString()}
                       </p>
-                      <p className="text-[11px] text-slate-400">PTS</p>
+                      <p className="text-[11px] text-slate-400">
+                        {timeframe === 'today'
+                          ? entry.activeScore === 1
+                            ? 'Visit'
+                            : 'Visits'
+                          : 'PTS'}
+                      </p>
                     </div>
 
                     {!entry.isCurrentUser ? (

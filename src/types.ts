@@ -119,6 +119,7 @@ export interface AdsterraDetailedStats {
 }
 
 export interface AdsterraBackendStatus {
+  backendReachable?: boolean;
   hasApiKey: boolean;
   apiKeyHint: string;
   apiVerified: boolean;

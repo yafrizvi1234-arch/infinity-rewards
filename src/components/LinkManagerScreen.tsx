@@ -376,6 +376,11 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
                 onChange={(e) => setCategory(e.target.value)}
                 className="mt-1 min-h-[44px] w-full rounded-xl border border-white/15 bg-slate-950/70 px-3 py-2 text-sm text-white focus:border-cyan-400 focus:outline-none"
               >
+                {category && !(LINK_CATEGORIES as readonly string[]).includes(category) && (
+                  <option value={category} className="bg-slate-900 text-white">
+                    {category}
+                  </option>
+                )}
                 {LINK_CATEGORIES.map((cat) => (
                   <option key={cat} value={cat} className="bg-slate-900 text-white">
                     {cat}

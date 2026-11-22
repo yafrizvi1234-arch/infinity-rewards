@@ -294,15 +294,11 @@ export async function updateOwnLinkSecure(params: {
   const cleanCategory = params.category.trim().slice(0, 40);
   const safeCategory = cleanCategory.length >= 2 ? cleanCategory : 'Other';
   const nextUrlKey = await computeUrlKey(validation.normalizedUrl);
-  const urlChanged = nextUrlKey !== params.existingLink.urlKey;
-  const oldUrlKey = params.existingLink.urlKey;
+  const fallbackOldUrlKey = params.existingLink.urlKey;
   const linkRef = doc(db, 'links', params.existingLink.id);
 
-  const [linkSnap, oldRegSnap, nextRegSnap] = await Promise.all([
+  const [linkSnap, nextRegSnap] = await Promise.all([
     getDoc(linkRef),
-    urlChanged && oldUrlKey
-      ? getDoc(doc(db, 'linkRegistry', oldUrlKey))
-      : Promise.resolve(null),
     getDoc(doc(db, 'linkRegistry', nextUrlKey)),
   ]);
 
@@ -314,9 +310,15 @@ export async function updateOwnLinkSecure(params: {
     throw new Error('Another link already uses this destination URL.');
   }
 
+  const liveOldUrlKey = String(linkSnap.data()?.urlKey || fallbackOldUrlKey || '').trim();
+  const urlChanged = Boolean(liveOldUrlKey && liveOldUrlKey !== nextUrlKey);
+  const oldRegSnap = urlChanged
+    ? await getDoc(doc(db, 'linkRegistry', liveOldUrlKey))
+    : null;
+
   const batch = writeBatch(db);
   if (urlChanged && oldRegSnap?.exists()) {
-    batch.delete(doc(db, 'linkRegistry', oldUrlKey));
+    batch.delete(doc(db, 'linkRegistry', liveOldUrlKey));
   }
   if (!nextRegSnap.exists()) {
     batch.set(doc(db, 'linkRegistry', nextUrlKey), {
@@ -488,18 +490,28 @@ export async function reportLinkSecure(params: {
 
   const reportId = `${params.reporterUid}_${params.link.id}`;
   const reportRef = doc(db, 'linkReports', reportId);
+  const linkRef = doc(db, 'links', params.link.id);
 
+  let existingSnap;
+  let linkSnap;
   try {
-    const existingSnap = await getDoc(reportRef);
-    if (existingSnap.exists()) {
-      throw new Error('You have already submitted a report for this link.');
-    }
+    [existingSnap, linkSnap] = await Promise.all([getDoc(reportRef), getDoc(linkRef)]);
   } catch (error) {
-    if (error instanceof Error && error.message.includes('already submitted')) {
-      throw error;
-    }
     handleFirestoreError(error, OperationType.GET, `linkReports/${reportId}`);
   }
+
+  if (existingSnap.exists()) {
+    throw new Error('You have already submitted a report for this link.');
+  }
+  if (!linkSnap.exists()) {
+    throw new Error('This link is no longer available.');
+  }
+
+  const rawReportCount = linkSnap.data()?.reportCount;
+  const liveReportCount =
+    typeof rawReportCount === 'number' && Number.isInteger(rawReportCount) && rawReportCount >= 0
+      ? rawReportCount
+      : 0;
 
   const batch = writeBatch(db);
   batch.set(reportRef, {
@@ -514,8 +526,8 @@ export async function reportLinkSecure(params: {
     updatedAt: serverTimestamp(),
   });
 
-  batch.update(doc(db, 'links', params.link.id), {
-    reportCount: params.link.reportCount + 1,
+  batch.update(linkRef, {
+    reportCount: Math.min(10000, liveReportCount + 1),
     updatedAt: serverTimestamp(),
   });
 
@@ -661,26 +673,36 @@ export async function resolveReportSecure(params: {
     updatedAt: serverTimestamp(),
   });
 
-  if (params.action === 'resolve_and_remove' && params.linkedItem) {
-    const linkRef = doc(db, 'links', params.linkedItem.id);
-    const linkSnap = await getDoc(linkRef);
-    if (linkSnap.exists()) {
-      batch.delete(linkRef);
-    }
-    if (params.linkedItem.urlKey) {
-      const regRef = doc(db, 'linkRegistry', params.linkedItem.urlKey);
-      const regSnap = await getDoc(regRef);
-      if (regSnap.exists()) {
-        batch.delete(regRef);
-      }
+  const targetLinkId = params.linkedItem?.id || params.report.linkId;
+  const linkRef = targetLinkId ? doc(db, 'links', targetLinkId) : null;
+  const linkSnap =
+    params.action === 'resolve_and_remove' && linkRef ? await getDoc(linkRef) : null;
+
+  if (params.action === 'resolve_and_remove' && linkRef && linkSnap?.exists()) {
+    batch.delete(linkRef);
+  }
+
+  const resolvedUrlKey = String(
+    params.linkedItem?.urlKey || linkSnap?.data()?.urlKey || ''
+  ).trim();
+  if (params.action === 'resolve_and_remove' && resolvedUrlKey) {
+    const regRef = doc(db, 'linkRegistry', resolvedUrlKey);
+    const regSnap = await getDoc(regRef);
+    if (regSnap.exists()) {
+      batch.delete(regRef);
     }
   }
+
+  const targetOwnerId =
+    params.linkedItem?.ownerId ||
+    String(linkSnap?.data()?.ownerId || '').trim() ||
+    params.report.reporterId;
 
   const logRef = doc(collection(db, 'moderationLogs'));
   batch.set(logRef, {
     linkId: params.report.linkId,
     linkTitle: params.report.linkTitle.slice(0, 80),
-    targetOwnerId: params.linkedItem?.ownerId || params.report.reporterId,
+    targetOwnerId,
     action: params.action === 'resolve_and_remove' ? 'resolve_report' : 'dismiss_report',
     reason:
       cleanNote ||

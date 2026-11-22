@@ -186,6 +186,7 @@ function maskKeyHint(apiKey: string): string {
 function toSafeStatusPayload(record: StoredSecretRecord | undefined) {
   if (!record) {
     return {
+      backendReachable: true,
       hasApiKey: false,
       apiKeyHint: '',
       apiVerified: false,
@@ -199,6 +200,7 @@ function toSafeStatusPayload(record: StoredSecretRecord | undefined) {
     };
   }
   return {
+    backendReachable: true,
     hasApiKey: true,
     apiKeyHint: record.keyHint,
     apiVerified: record.apiVerified,
@@ -331,7 +333,16 @@ function formatUtcYmd(offsetDays = 0): string {
 }
 
 function isValidYmd(value: unknown): value is string {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
 }
 
 function extractApiItemsArray(json: unknown): Array<Record<string, unknown>> {
@@ -420,13 +431,13 @@ async function fetchAdsterraStatsGroup(params: {
     group_by: params.groupBy,
   });
   if (params.domainId && /^\d+$/.test(params.domainId.trim())) {
-    qs.set('domain_id', params.domainId.trim());
+    qs.set('domain', params.domainId.trim());
   }
   if (params.placementId && /^\d+$/.test(params.placementId.trim())) {
-    qs.set('placement_id', params.placementId.trim());
+    qs.set('placement', params.placementId.trim());
   }
   if (params.country && /^[a-zA-Z]{2}$/.test(params.country.trim())) {
-    qs.set('country', params.country.trim().toLowerCase());
+    qs.set('country', params.country.trim().toUpperCase());
   }
 
   const res = await fetch(`${ADSTERRA_API_BASE}/stats.json?${qs.toString()}`, {
@@ -459,6 +470,7 @@ async function fetchAdsterraDetailedStats(params: {
   domainsPreview: Array<{ id: string; title: string }>;
   placementsPreview: PlacementPreviewItem[];
   cachedPeriods?: AdsterraDetailedStats['periods'] | null;
+  cachedFetchedAtMs?: number | null;
 }): Promise<AdsterraDetailedStats> {
   const domainMap = new Map(params.domainsPreview.map((d) => [d.id, d.title]));
   const placementMap = new Map(params.placementsPreview.map((p) => [p.id, p]));
@@ -467,14 +479,22 @@ async function fetchAdsterraDetailedStats(params: {
   const yesterdayYmd = formatUtcYmd(-1);
   const last7StartYmd = formatUtcYmd(-6);
   const last30StartYmd = formatUtcYmd(-29);
+  const cachedDayYmd = params.cachedFetchedAtMs
+    ? new Date(params.cachedFetchedAtMs).toISOString().slice(0, 10)
+    : null;
+  const hasEntityFilters = Boolean(params.domainId || params.placementId || params.country);
 
-  const shouldAlsoFetchPeriodRollup =
-    !params.cachedPeriods ||
-    (params.startDate <= last30StartYmd &&
-      params.finishDate >= todayYmd &&
-      !params.domainId &&
-      !params.placementId &&
-      !params.country);
+  const shouldRefreshPeriodRollup =
+    !hasEntityFilters &&
+    (!params.cachedPeriods ||
+      cachedDayYmd !== todayYmd ||
+      params.preset !== 'custom' ||
+      (params.startDate <= last30StartYmd && params.finishDate >= todayYmd));
+
+  const mainCoversLast30Unfiltered =
+    !hasEntityFilters &&
+    params.startDate <= last30StartYmd &&
+    params.finishDate >= todayYmd;
 
   const [dateRaw, placementRaw, domainRaw, countryRaw, periodDateRaw] = await Promise.all([
     fetchAdsterraStatsGroup({
@@ -513,8 +533,7 @@ async function fetchAdsterraDetailedStats(params: {
       placementId: params.placementId,
       country: params.country,
     }),
-    shouldAlsoFetchPeriodRollup &&
-    !(params.startDate === last30StartYmd && params.finishDate === todayYmd && !params.domainId && !params.placementId && !params.country)
+    shouldRefreshPeriodRollup && !mainCoversLast30Unfiltered
       ? fetchAdsterraStatsGroup({
           apiKey: params.apiKey,
           startDate: last30StartYmd,
@@ -540,10 +559,10 @@ async function fetchAdsterraDetailedStats(params: {
 
   const byPlacement: AdsterraStatRow[] = placementRaw
     .map((row, idx) => {
-      const pid = String(row.placement_id ?? row.placementId ?? row.id ?? '').trim();
+      const pid = String(row.placement_id ?? row.placementId ?? row.placement ?? row.id ?? '').trim();
       const matched = pid ? placementMap.get(pid) : undefined;
       const rawTitle = String(
-        row.placement ?? row.placement_title ?? row.title ?? matched?.title ?? `Placement #${pid || idx + 1}`
+        row.placement_title ?? row.title ?? matched?.title ?? (pid ? `Placement #${pid}` : `Placement #${idx + 1}`)
       ).slice(0, 80);
       const dTitle = matched?.domainId ? domainMap.get(matched.domainId) : undefined;
       return {
@@ -559,10 +578,10 @@ async function fetchAdsterraDetailedStats(params: {
 
   const byDomain: AdsterraStatRow[] = domainRaw
     .map((row, idx) => {
-      const did = String(row.domain_id ?? row.domainId ?? row.id ?? '').trim();
+      const did = String(row.domain_id ?? row.domainId ?? row.domain ?? row.id ?? '').trim();
       const matchedTitle = did ? domainMap.get(did) : undefined;
       const rawTitle = String(
-        row.domain ?? row.domain_title ?? row.title ?? matchedTitle ?? `Domain #${did || idx + 1}`
+        row.domain_title ?? row.title ?? matchedTitle ?? (did ? `Domain #${did}` : `Domain #${idx + 1}`)
       ).slice(0, 80);
       return {
         key: did || `dom_${idx}`,
@@ -602,11 +621,7 @@ async function fetchAdsterraDetailedStats(params: {
           );
           return { key: dateStr, label: dateStr, ...normalizeRowMetrics(row) };
         })
-      : params.startDate <= last30StartYmd &&
-          params.finishDate >= todayYmd &&
-          !params.domainId &&
-          !params.placementId &&
-          !params.country
+      : mainCoversLast30Unfiltered
         ? byDate
         : null;
 
@@ -771,14 +786,26 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  const extraAllowedOrigins = new Set(
+    (process.env.ALLOWED_CORS_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
   app.use('/api', (req, res, next) => {
     const origin = req.headers.origin;
-    if (
-      origin &&
+    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : '';
+    const isAllowedOrigin =
+      Boolean(origin) &&
       (origin === 'https://yafrizvi1234-arch.github.io' ||
-        origin.startsWith('http://localhost:') ||
-        origin.startsWith('http://127.0.0.1:'))
-    ) {
+        origin === 'https://infinity-rewards-fihc.onrender.com' ||
+        (hostHeader &&
+          (origin === `https://${hostHeader}` || origin === `http://${hostHeader}`)) ||
+        extraAllowedOrigins.has(origin!) ||
+        origin!.startsWith('http://localhost:') ||
+        origin!.startsWith('http://127.0.0.1:'));
+
+    if (origin && isAllowedOrigin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
@@ -893,8 +920,16 @@ export function createApp() {
 
       try {
         const snapshot = await fetchAdsterraOfficialSnapshot(apiKey);
-        vault[uid] = {
-          ...record,
+        const latestVault = readSecretsVault();
+        const latestRecord = latestVault[uid];
+        if (!latestRecord) {
+          res.status(404).json({
+            error: 'Adsterra API Key was disconnected during sync.',
+          });
+          return;
+        }
+        latestVault[uid] = {
+          ...latestRecord,
           apiVerified: true,
           verifiedDomainsCount: snapshot.domainsCount,
           verifiedPlacementsCount: snapshot.placementsCount,
@@ -905,8 +940,8 @@ export function createApp() {
           lastSyncedAtMs: Date.now(),
           updatedAtMs: Date.now(),
         };
-        writeSecretsVault(vault);
-        res.json(toSafeStatusPayload(vault[uid]));
+        writeSecretsVault(latestVault);
+        res.json(toSafeStatusPayload(latestVault[uid]));
       } catch (err) {
         res.status(502).json({
           error:
@@ -997,6 +1032,7 @@ export function createApp() {
           domainsPreview: record.domainsPreview,
           placementsPreview: record.placementsPreview,
           cachedPeriods: record.detailedStats?.periods ?? null,
+          cachedFetchedAtMs: record.detailedStats?.fetchedAtMs ?? null,
         });
 
         const nextSummary: StatsSummary = {
@@ -1009,15 +1045,23 @@ export function createApp() {
           ctr: detailedStats.periods.last7d.ctr,
         };
 
-        vault[uid] = {
-          ...record,
+        const latestVault = readSecretsVault();
+        const latestRecord = latestVault[uid];
+        if (!latestRecord) {
+          res.status(404).json({
+            error: 'Adsterra API Key was disconnected while fetching stats.',
+          });
+          return;
+        }
+        latestVault[uid] = {
+          ...latestRecord,
           statsSummary: nextSummary,
           detailedStats,
           lastSyncedAtMs: Date.now(),
           updatedAtMs: Date.now(),
         };
-        writeSecretsVault(vault);
-        res.json(toSafeStatusPayload(vault[uid]));
+        writeSecretsVault(latestVault);
+        res.json(toSafeStatusPayload(latestVault[uid]));
       } catch (err) {
         res.status(502).json({
           error:

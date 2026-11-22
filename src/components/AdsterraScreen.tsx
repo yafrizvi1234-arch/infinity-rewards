@@ -158,8 +158,12 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
   const [publishingUrl, setPublishingUrl] = useState<string | null>(null);
   const [deletingPersonalId, setDeletingPersonalId] = useState<string | null>(null);
 
-  const hasBackendKey = backendStatus.hasApiKey || Boolean(integration?.hasApiKey);
-  const isConnected = integration?.status === 'connected' || hasBackendKey;
+  const backendReachable = backendStatus.backendReachable === true;
+  const backendKnownEmpty = backendReachable && !backendStatus.hasApiKey;
+  const hasBackendKey = backendReachable
+    ? backendStatus.hasApiKey
+    : Boolean(integration?.hasApiKey);
+  const isConnected = hasBackendKey || (!backendReachable && integration?.status === 'connected');
   const keyHint = backendStatus.apiKeyHint || integration?.apiKeyHint || '';
   const domainsCount = backendStatus.verifiedDomainsCount || integration?.verifiedDomainsCount || 0;
   const placementsCount =
@@ -516,15 +520,27 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold ${
               isConnected
                 ? 'border-[#00FF87]/55 bg-[#00FF87]/15 text-[#00FF87]'
-                : 'border-white/15 bg-[#070B1E]/80 text-slate-300'
+                : backendKnownEmpty && integration?.hasApiKey
+                  ? 'border-[#FFB800]/55 bg-[#FFB800]/15 text-[#FFD166]'
+                  : 'border-white/15 bg-[#070B1E]/80 text-slate-300'
             }`}
           >
             <span
               className={`h-2 w-2 rounded-full ${
-                isConnected ? 'bg-[#00FF87]' : 'bg-slate-500'
+                isConnected
+                  ? 'bg-[#00FF87]'
+                  : backendKnownEmpty && integration?.hasApiKey
+                    ? 'bg-[#FFB800]'
+                    : 'bg-slate-500'
               }`}
             />
-            <span>{isConnected ? `API Connected (${keyHint || 'Active'})` : 'Not Connected'}</span>
+            <span>
+              {isConnected
+                ? `API Connected (${keyHint || 'Active'})`
+                : backendKnownEmpty && integration?.hasApiKey
+                  ? 'Reconnect API Key'
+                  : 'Not Connected'}
+            </span>
           </span>
 
           {hasBackendKey && (
@@ -712,7 +728,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
               </>
             )}
 
-            <div className={preset === 'custom' ? 'lg:col-span-3' : 'lg:col-span-4'}>
+            <div className={preset === 'custom' ? 'lg:col-span-2' : 'lg:col-span-4'}>
               <label className="mb-1 flex items-center gap-1 text-[11px] text-slate-400">
                 <Globe className="h-3 w-3 text-[#3B82F6]" />
                 <span>Filter by Domain</span>
@@ -731,7 +747,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
               </select>
             </div>
 
-            <div className={preset === 'custom' ? 'lg:col-span-3' : 'lg:col-span-4'}>
+            <div className={preset === 'custom' ? 'lg:col-span-2' : 'lg:col-span-4'}>
               <label className="mb-1 flex items-center gap-1 text-[11px] text-slate-400">
                 <Layers className="h-3 w-3 text-[#B84DFF]" />
                 <span>Filter by Placement / Smartlink</span>
@@ -1138,6 +1154,13 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             </button>
           )}
         </div>
+
+        {backendKnownEmpty && integration?.hasApiKey && (
+          <p className="rounded-xl border border-[#FFB800]/35 bg-[#FFB800]/10 px-3.5 py-2 text-xs text-[#FFD166]">
+            Server vault reset (e.g. after Render restart) — paste your Adsterra API Token below to
+            resume live analytics.
+          </p>
+        )}
 
         <form onSubmit={handleSaveApiKey} className="flex flex-col gap-2.5 sm:flex-row">
           <input
