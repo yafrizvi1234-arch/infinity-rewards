@@ -736,24 +736,40 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
   }));
 
   const placementsPreview: PlacementPreviewItem[] = placementItems.slice(0, 100).map((p) => {
-    const candidateUrl = [
+    const rawCandidate = [
       p.url,
       p.direct_url,
       p.directUrl,
       p.direct_link,
+      p.direct_link_url,
+      p.directLinkUrl,
       p.smartlink_url,
+      p.smartlinkUrl,
       p.smartlink,
       p.smart_link,
       p.link,
+      p.link_url,
+      p.linkUrl,
       p.target_url,
-    ].find((v) => typeof v === 'string' && /^https?:\/\//i.test(v.trim())) as string | undefined;
+      p.ad_url,
+      p.adUrl,
+      p.redirect_url,
+      p.redirectUrl,
+    ].find(
+      (v) => typeof v === 'string' && /^(https?:)?\/\/[^\s"'<>]+$/i.test(v.trim())
+    ) as string | undefined;
+    const candidateUrl = rawCandidate
+      ? rawCandidate.trim().startsWith('//')
+        ? `https:${rawCandidate.trim()}`
+        : rawCandidate.trim()
+      : undefined;
     return {
       id: String(p.id ?? ''),
       domainId: String(p.domain_id ?? ''),
       title: String(p.title ?? p.alias ?? 'Placement').slice(0, 80),
       ...(typeof p.type === 'string' ? { type: p.type.slice(0, 32) } : {}),
       ...(typeof p.status === 'string' ? { status: p.status.slice(0, 32) } : {}),
-      ...(candidateUrl ? { directUrl: candidateUrl.trim().slice(0, 500) } : {}),
+      ...(candidateUrl ? { directUrl: candidateUrl.slice(0, 500) } : {}),
     };
   });
 

@@ -356,7 +356,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       setApiKeyInput('');
       setFeedback({
         type: 'success',
-        message: 'Adsterra API connected & full analytics synced.',
+        message:
+          'Adsterra API connected & Smartlinks with direct URLs auto-shared to Community Exchange.',
       });
     } catch (err) {
       setFeedback({
@@ -377,7 +378,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       await onSyncOfficialApi();
       setFeedback({
         type: 'success',
-        message: 'Live Adsterra dollars, CPM, CTR, domains & placements synced.',
+        message:
+          'Live Adsterra stats, domains, placements & Community Smartlinks synced automatically.',
       });
     } catch (err) {
       setFeedback({
@@ -435,7 +437,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       setAttachUrlInput('');
       setFeedback({
         type: 'success',
-        message: `Smartlink URL linked for "${placementTitle}".`,
+        message: `Smartlink URL saved & auto-shared with everyone in Community for "${placementTitle}".`,
       });
     } catch (err) {
       setFeedback({
@@ -1275,7 +1277,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
         </div>
 
         <div className="rounded-2xl border border-[#00FF87]/30 bg-[#00FF87]/8 px-4 py-2.5 text-xs text-slate-200">
-          <span className="font-bold text-[#00FF87]">Mutual Exchange Active:</span> Your own Smartlinks are hidden from your own Auto-Visit queue so you never self-click. Click <span className="font-bold text-white">Publish to Community</span> so other members visit your Smartlinks from their devices while you visit theirs.
+          <span className="font-bold text-[#00FF87]">Auto-Share Mutual Exchange Active:</span>{' '}
+          Whenever you connect your Adsterra API or link a Smartlink URL, your Smartlinks automatically publish live to all other members&apos; Auto-Visit queues (while staying hidden from your own queue so you never self-click).
         </div>
 
         {/* Ready Smartlinks List */}

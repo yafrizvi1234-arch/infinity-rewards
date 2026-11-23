@@ -99,7 +99,10 @@ import {
   VisitTab,
 } from './types';
 
+import { validateAndNormalizeUrl } from './utils/urlValidator';
+
 const STORAGE_PREFIX = 'infinity_rewards_phase4_v1';
+const SUPPRESSED_AUTOPUBLISH_PREFIX = 'infinity_rewards_suppressed_autopublish_v1';
 const VALID_SCREENS: MainScreen[] = [
   'home',
   'leaderboard',
@@ -121,6 +124,45 @@ interface CachedUiPrefs {
 
 function getStorageKey(uid: string): string {
   return `${STORAGE_PREFIX}_${uid}`;
+}
+
+function getSuppressedAutoPublishKey(uid: string): string {
+  return `${SUPPRESSED_AUTOPUBLISH_PREFIX}_${uid}`;
+}
+
+function readSuppressedAutoPublishUrls(uid: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(getSuppressedAutoPublishKey(uid));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((v): v is string => typeof v === 'string'))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function updateSuppressedAutoPublishUrl(
+  uid: string,
+  normalizedUrl: string,
+  mode: 'add' | 'remove'
+): void {
+  if (!normalizedUrl) return;
+  try {
+    const current = readSuppressedAutoPublishUrls(uid);
+    if (mode === 'add') {
+      current.add(normalizedUrl);
+    } else {
+      current.delete(normalizedUrl);
+    }
+    window.localStorage.setItem(
+      getSuppressedAutoPublishKey(uid),
+      JSON.stringify(Array.from(current).slice(-100))
+    );
+  } catch {
+    // Ignore storage quota issues gracefully
+  }
 }
 
 function loadUserUiCache(
@@ -216,6 +258,7 @@ export default function App() {
   // Phase 4 Real-Time Link Management States
   const [approvedLinks, setApprovedLinks] = useState<ManagedLink[]>([]);
   const [mySubmittedLinks, setMySubmittedLinks] = useState<ManagedLink[]>([]);
+  const [myLinksHydrated, setMyLinksHydrated] = useState<boolean>(false);
   const [myLinkVisits, setMyLinkVisits] = useState<LinkVisitRecord[]>([]);
   const [adminAllLinks, setAdminAllLinks] = useState<ManagedLink[]>([]);
   const [adminReports, setAdminReports] = useState<LinkReportRecord[]>([]);
@@ -258,6 +301,8 @@ export default function App() {
   const lastForceCheckedRef = useRef<{ key: string; at: number } | null>(null);
   const lastIdentityKeyRef = useRef<string | null>(null);
   const visitStatsQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const attemptedAutoPublishUrlsRef = useRef<Set<string>>(new Set());
+  const autoPublishInFlightRef = useRef<boolean>(false);
   const autoEnabledMultiRef = useRef(false);
   const latestWorkspaceRef = useRef({
     demoPoints: state.demoPoints,
@@ -527,7 +572,10 @@ export default function App() {
     const unsubMyLinks = subscribeMySubmittedLinks(
       authUser.uid,
       (list) => {
-        if (!cancelled) setMySubmittedLinks(list);
+        if (!cancelled) {
+          setMySubmittedLinks(list);
+          setMyLinksHydrated(true);
+        }
       },
       handleListenerError
     );
@@ -600,6 +648,8 @@ export default function App() {
       setAdsterraIntegration(null);
       setAdsterraBackendStatus(DEFAULT_BACKEND_STATUS);
       setPersonalSmartlinks([]);
+      setMyLinksHydrated(false);
+      attemptedAutoPublishUrlsRef.current.clear();
     };
   }, [authUser, isEmailVerified, clearAdminSessionState, retryNonce]);
 
@@ -994,6 +1044,10 @@ export default function App() {
       actorEmail: authUser.email,
       asAdmin: false,
     });
+    const norm = link.normalizedUrl || validateAndNormalizeUrl(link.url).normalizedUrl;
+    if (norm) {
+      updateSuppressedAutoPublishUrl(authUser.uid, norm, 'add');
+    }
     setToastMessage('Link deleted');
   };
 
@@ -1106,6 +1160,169 @@ export default function App() {
     setToastMessage('bKash & Nagad payment numbers updated');
   };
 
+  const autoPublishSmartlinksToCommunity = useCallback(
+    async (
+      candidates: Array<{ title: string; url: string; category?: string }>,
+      options?: { ignoreSuppressed?: boolean }
+    ): Promise<number> => {
+      if (!authUser || !isEmailVerified || candidates.length === 0) return 0;
+      if (autoPublishInFlightRef.current) return 0;
+      autoPublishInFlightRef.current = true;
+
+      let publishedCount = 0;
+      try {
+        const suppressed = options?.ignoreSuppressed
+          ? new Set<string>()
+          : readSuppressedAutoPublishUrls(authUser.uid);
+
+        const knownUrls = new Set<string>();
+        for (const item of mySubmittedLinks) {
+          if (item.normalizedUrl) knownUrls.add(item.normalizedUrl);
+          if (item.url) knownUrls.add(item.url.trim());
+        }
+        for (const item of approvedLinks) {
+          if (item.normalizedUrl) knownUrls.add(item.normalizedUrl);
+          if (item.url) knownUrls.add(item.url.trim());
+        }
+
+        const dedupedBatch: Array<{
+          title: string;
+          url: string;
+          normalized: string;
+          category: string;
+        }> = [];
+        const batchSeen = new Set<string>();
+
+        for (const candidate of candidates) {
+          const check = validateAndNormalizeUrl(candidate.url);
+          if (!check.valid || !check.url || !check.normalizedUrl) continue;
+          const normalized = check.normalizedUrl;
+          if (
+            batchSeen.has(normalized) ||
+            knownUrls.has(normalized) ||
+            knownUrls.has(check.url) ||
+            suppressed.has(normalized) ||
+            attemptedAutoPublishUrlsRef.current.has(normalized)
+          ) {
+            continue;
+          }
+          batchSeen.add(normalized);
+          dedupedBatch.push({
+            title: candidate.title,
+            url: check.url,
+            normalized,
+            category: candidate.category || 'Other',
+          });
+          if (dedupedBatch.length >= 10) break;
+        }
+
+        for (const entry of dedupedBatch) {
+          attemptedAutoPublishUrlsRef.current.add(entry.normalized);
+          const trimmedTitle = entry.title.trim();
+          const safeTitle =
+            trimmedTitle.length >= 3
+              ? trimmedTitle.slice(0, 80)
+              : `${trimmedTitle || 'Adsterra'} Smartlink`.slice(0, 80);
+
+          try {
+            await submitLinkSecure({
+              uid: authUser.uid,
+              ownerName: state.profile.displayName,
+              ownerUsername: `@${state.profile.username}`,
+              ownerAvatar: state.profile.avatar,
+              type: 'smartlink',
+              title: safeTitle,
+              description:
+                'Adsterra Smartlink auto-shared for mutual real human community visits.',
+              rawUrl: entry.url,
+              category: entry.category,
+            });
+            publishedCount += 1;
+            knownUrls.add(entry.normalized);
+          } catch {
+            // Skip duplicate or validation-rejected URLs silently
+          }
+        }
+      } finally {
+        autoPublishInFlightRef.current = false;
+      }
+
+      return publishedCount;
+    },
+    [
+      approvedLinks,
+      authUser,
+      isEmailVerified,
+      mySubmittedLinks,
+      state.profile.avatar,
+      state.profile.displayName,
+      state.profile.username,
+    ]
+  );
+
+  const collectSmartlinkCandidates = useCallback(
+    (
+      backendStatus: AdsterraBackendStatus,
+      integration: AdsterraIntegrationRecord | null,
+      personalList: UserPersonalSmartlink[]
+    ) => {
+      const candidates: Array<{ title: string; url: string; category?: string }> = [];
+      for (const p of backendStatus.placementsPreview) {
+        if (!p.directUrl) continue;
+        candidates.push({
+          title: p.title || `Adsterra Placement #${p.id}`,
+          url: p.directUrl,
+          category: 'Other',
+        });
+      }
+      for (const l of personalList) {
+        candidates.push({
+          title: l.title,
+          url: l.url,
+          category: l.category || 'Other',
+        });
+      }
+      if (integration?.smartlinkUrl) {
+        candidates.push({
+          title: integration.smartlinkTitle || 'Primary Adsterra Smartlink',
+          url: integration.smartlinkUrl,
+          category: 'Other',
+        });
+      }
+      return candidates;
+    },
+    []
+  );
+
+  // Auto-publish synced Adsterra Smartlinks to Community Exchange once workspace & links hydrate
+  useEffect(() => {
+    if (!authUser || !isEmailVerified || !workspaceReady || !myLinksHydrated) return;
+    const candidates = collectSmartlinkCandidates(
+      adsterraBackendStatus,
+      adsterraIntegration,
+      personalSmartlinks
+    );
+    if (candidates.length === 0) return;
+
+    void autoPublishSmartlinksToCommunity(candidates).then((count) => {
+      if (count > 0) {
+        setToastMessage(
+          `Auto-shared ${count} Adsterra Smartlink${count === 1 ? '' : 's'} with everyone in Community!`
+        );
+      }
+    });
+  }, [
+    adsterraBackendStatus,
+    adsterraIntegration,
+    authUser,
+    autoPublishSmartlinksToCommunity,
+    collectSmartlinkCandidates,
+    isEmailVerified,
+    myLinksHydrated,
+    personalSmartlinks,
+    workspaceReady,
+  ]);
+
   // Per-user isolated Adsterra handlers
   const handleConnectAdsterraApiKey = async (payload: {
     apiKey: string;
@@ -1123,10 +1340,18 @@ export default function App() {
       connectionMode: 'official_api_key',
       backendStatus: nextBackendStatus,
     });
+    const candidates = collectSmartlinkCandidates(
+      nextBackendStatus,
+      adsterraIntegration,
+      personalSmartlinks
+    );
+    const sharedCount = await autoPublishSmartlinksToCommunity(candidates);
     setToastMessage(
-      nextBackendStatus.apiVerified
-        ? 'Adsterra API Key verified and encrypted on backend'
-        : 'Adsterra API Key stored in encrypted backend vault'
+      sharedCount > 0
+        ? `Adsterra API connected & ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} auto-shared with everyone!`
+        : nextBackendStatus.apiVerified
+          ? 'Adsterra API Key verified and encrypted on backend'
+          : 'Adsterra API Key stored in encrypted backend vault'
     );
   };
 
@@ -1145,7 +1370,17 @@ export default function App() {
         backendStatus: nextBackendStatus,
       });
     }
-    setToastMessage('Synced domains, placements & full Adsterra stats');
+    const candidates = collectSmartlinkCandidates(
+      nextBackendStatus,
+      adsterraIntegration,
+      personalSmartlinks
+    );
+    const sharedCount = await autoPublishSmartlinksToCommunity(candidates);
+    setToastMessage(
+      sharedCount > 0
+        ? `Synced Adsterra API & auto-shared ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} with everyone!`
+        : 'Synced domains, placements & full Adsterra stats'
+    );
   };
 
   const handleFetchAdsterraStats = useCallback(
@@ -1183,7 +1418,26 @@ export default function App() {
       rawUrl: payload.rawUrl,
       category: payload.category,
     });
-    setToastMessage('Personal Smartlink added to your private workspace');
+    const urlCheck = validateAndNormalizeUrl(payload.rawUrl);
+    if (urlCheck.normalizedUrl) {
+      updateSuppressedAutoPublishUrl(authUser.uid, urlCheck.normalizedUrl, 'remove');
+      attemptedAutoPublishUrlsRef.current.delete(urlCheck.normalizedUrl);
+    }
+    const sharedCount = await autoPublishSmartlinksToCommunity(
+      [
+        {
+          title: payload.title,
+          url: payload.rawUrl,
+          category: payload.category || 'Other',
+        },
+      ],
+      { ignoreSuppressed: true }
+    );
+    setToastMessage(
+      sharedCount > 0
+        ? 'Smartlink saved & auto-shared with everyone in Community!'
+        : 'Personal Smartlink added to your private workspace'
+    );
   };
 
   const handleDeletePersonalSmartlink = async (linkId: string) => {
@@ -1197,6 +1451,13 @@ export default function App() {
     url: string;
     category: string;
   }) => {
+    if (authUser) {
+      const check = validateAndNormalizeUrl(payload.url);
+      if (check.normalizedUrl) {
+        updateSuppressedAutoPublishUrl(authUser.uid, check.normalizedUrl, 'remove');
+        attemptedAutoPublishUrlsRef.current.delete(check.normalizedUrl);
+      }
+    }
     const trimmedTitle = payload.title.trim();
     const safeTitle =
       trimmedTitle.length >= 3
