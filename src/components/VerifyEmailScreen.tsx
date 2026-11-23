@@ -10,7 +10,7 @@ import {
 
 interface VerifyEmailScreenProps {
   user: User;
-  onVerified: (refreshedUser: User) => void;
+  onVerified: (refreshedUser: User) => Promise<void> | void;
 }
 
 export const VerifyEmailScreen: React.FC<VerifyEmailScreenProps> = ({ user, onVerified }) => {
@@ -35,7 +35,7 @@ export const VerifyEmailScreen: React.FC<VerifyEmailScreenProps> = ({ user, onVe
     try {
       const updated = await refreshAuthUser(user);
       if (updated.emailVerified) {
-        onVerified(updated);
+        await onVerified(updated);
       } else {
         setErrorMsg(
           'Your email is not verified yet. Please click the verification link in your inbox, then tap check again.'

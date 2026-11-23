@@ -3,6 +3,7 @@ services:
     name: infinity-rewards
     runtime: node
     plan: free
+    autoDeploy: true
     buildCommand: npm install --include=dev --legacy-peer-deps && npm run build
     startCommand: npm start
     healthCheckPath: /api/health

@@ -128,7 +128,11 @@ export async function resendVerificationEmail(user: User): Promise<void> {
 
 export async function refreshAuthUser(user: User): Promise<User> {
   await user.reload();
-  return auth.currentUser ?? user;
+  const current = auth.currentUser ?? user;
+  if (current.emailVerified) {
+    await current.getIdToken(true);
+  }
+  return current;
 }
 
 export async function logoutUser(): Promise<void> {

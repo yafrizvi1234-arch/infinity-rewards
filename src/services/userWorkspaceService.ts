@@ -612,7 +612,7 @@ export function subscribeToPublicProfiles(
   const q = query(
     collection(db, 'publicProfiles'),
     where('isDiscoverable', '==', true),
-    limit(30)
+    limit(100)
   );
   return onSnapshot(
     q,

@@ -64,6 +64,7 @@ interface AdsterraScreenProps {
     url: string;
     category: string;
   }) => Promise<void>;
+  onRefreshBackendStatus?: () => Promise<void>;
   onOpenProModal: () => void;
 }
 
@@ -123,12 +124,14 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
   onCreatePersonalSmartlink,
   onDeletePersonalSmartlink,
   onPublishToCommunity,
+  onRefreshBackendStatus,
   onOpenProModal,
 }) => {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [syncingApi, setSyncingApi] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [retryingBackend, setRetryingBackend] = useState(false);
   const [attachingPlacementId, setAttachingPlacementId] = useState<string | null>(null);
   const [attachUrlInput, setAttachUrlInput] = useState('');
   const [savingAttachedUrl, setSavingAttachedUrl] = useState(false);
@@ -404,6 +407,17 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       });
     } finally {
       setDisconnecting(false);
+    }
+  };
+
+  const handleRetryBackend = async () => {
+    if (!onRefreshBackendStatus || retryingBackend) return;
+    setFeedback(null);
+    setRetryingBackend(true);
+    try {
+      await onRefreshBackendStatus();
+    } finally {
+      setRetryingBackend(false);
     }
   };
 
@@ -1154,6 +1168,23 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             </button>
           )}
         </div>
+
+        {!backendReachable && onRefreshBackendStatus && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-400/35 bg-amber-950/25 px-3.5 py-2.5 text-xs text-amber-100">
+            <span>
+              Backend API server is waking up or unavailable right now. Retry once ready.
+            </span>
+            <button
+              type="button"
+              disabled={retryingBackend}
+              onClick={() => void handleRetryBackend()}
+              className="flex min-h-[32px] items-center gap-1.5 rounded-lg border border-amber-300/45 bg-amber-500/20 px-3 py-1 font-semibold text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${retryingBackend ? 'animate-spin' : ''}`} />
+              <span>{retryingBackend ? 'Checking...' : 'Retry Connection'}</span>
+            </button>
+          </div>
+        )}
 
         {backendKnownEmpty && integration?.hasApiKey && (
           <p className="rounded-xl border border-[#FFB800]/35 bg-[#FFB800]/10 px-3.5 py-2 text-xs text-[#FFD166]">

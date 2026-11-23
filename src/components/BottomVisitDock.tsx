@@ -36,6 +36,7 @@ interface BottomVisitDockProps {
   visitMode: VisitMode;
   cooldowns: Record<string, number>;
   nowMs: number;
+  onChangeVisitMode?: (mode: VisitMode) => void;
   onCompleteLinkVisit: (item: AutoVisitQueueItem) => Promise<void>;
   onOpenProLocked: () => void;
   onClose: () => void;
@@ -93,6 +94,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   visitMode,
   cooldowns,
   nowMs,
+  onChangeVisitMode,
   onCompleteLinkVisit,
   onOpenProLocked,
   onClose,
@@ -162,6 +164,9 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
   const preferredBatchIdsRef = useRef(preferredBatchIds);
   preferredBatchIdsRef.current = preferredBatchIds;
+
+  const activeBatchIdsRef = useRef<string[]>([]);
+  activeBatchIdsRef.current = activeBatchIds;
 
   const linksById = useMemo(() => {
     const map = new Map<string, AutoVisitQueueItem>();
@@ -276,34 +281,80 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   useEffect(() => {
     if (!isOpen || completingCycleRef.current) return;
 
-    setActiveBatchIds((prev) => {
-      const currentNow = Date.now();
-      const valid = prev.filter((id) => {
-        const item = linksById.get(id);
-        return Boolean(item) && getEffectiveCooldownEnd(item!) <= currentNow;
-      });
-
-      if (valid.length === 0) {
-        return pickNextBatch(null, concurrencyLimit);
-      }
-
-      if (valid.length > concurrencyLimit) {
-        return valid.slice(0, concurrencyLimit);
-      }
-
-      if (valid.length < concurrencyLimit) {
-        const used = new Set(valid);
-        const extras = links
-          .filter(
-            (item) => !used.has(item.id) && getEffectiveCooldownEnd(item) <= currentNow
-          )
-          .slice(0, concurrencyLimit - valid.length)
-          .map((item) => item.id);
-        return extras.length > 0 ? [...valid, ...extras] : valid;
-      }
-
-      return valid.length === prev.length ? prev : valid;
+    const currentNow = Date.now();
+    const prev = activeBatchIdsRef.current;
+    const valid = prev.filter((id) => {
+      const item = linksById.get(id);
+      return Boolean(item) && getEffectiveCooldownEnd(item!) <= currentNow;
     });
+
+    if (valid.length === 0) {
+      const nextBatch = pickNextBatch(null, concurrencyLimit, preferredBatchIdsRef.current);
+      if (nextBatch.length === 0 && prev.length === 0) return;
+      setActiveBatchIds(nextBatch);
+      const nextStates: Record<string, SlotVisitState> = {};
+      for (const id of nextBatch) {
+        nextStates[id] = 'visiting';
+      }
+      setSlotStates(nextStates);
+      remainingSecRef.current = CYCLE_DURATION_SEC;
+      setRemainingSec(CYCLE_DURATION_SEC);
+      return;
+    }
+
+    if (valid.length > concurrencyLimit) {
+      setActiveBatchIds(valid.slice(0, concurrencyLimit));
+      return;
+    }
+
+    if (valid.length < concurrencyLimit) {
+      const used = new Set(valid);
+      const ready = links.filter((item) => getEffectiveCooldownEnd(item) <= currentNow);
+      const extras: string[] = [];
+      const needed = concurrencyLimit - valid.length;
+
+      if (preferredBatchIdsRef.current && preferredBatchIdsRef.current.length > 0) {
+        for (const prefId of preferredBatchIdsRef.current) {
+          if (extras.length >= needed) break;
+          if (used.has(prefId)) continue;
+          const match = ready.find((item) => item.id === prefId);
+          if (match) {
+            extras.push(match.id);
+            used.add(match.id);
+          }
+        }
+      }
+
+      if (extras.length < needed && ready.length > 0) {
+        const startIdx = cursorRef.current % ready.length;
+        for (let offset = 0; offset < ready.length && extras.length < needed; offset++) {
+          const candidate = ready[(startIdx + offset) % ready.length];
+          if (!used.has(candidate.id)) {
+            extras.push(candidate.id);
+            used.add(candidate.id);
+          }
+        }
+      }
+
+      if (extras.length > 0) {
+        if (ready.length > 0) {
+          cursorRef.current = (cursorRef.current + extras.length) % ready.length;
+        }
+        setActiveBatchIds([...valid, ...extras]);
+        setSlotStates((prevStates) => {
+          const updated = { ...prevStates };
+          for (const extraId of extras) {
+            if (!updated[extraId]) updated[extraId] = 'visiting';
+          }
+          return updated;
+        });
+        return;
+      }
+    }
+
+    if (valid.length !== prev.length) {
+      setActiveBatchIds(valid);
+    }
   }, [concurrencyLimit, getEffectiveCooldownEnd, isOpen, links, linksById, pickNextBatch]);
 
   const activeItems = useMemo(
@@ -346,7 +397,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       const activeSessionToken = sessionTokenRef.current;
 
       try {
-        const snapshot = activeBatchIds
+        const snapshot = activeBatchIdsRef.current
           .map((id) => linksById.get(id))
           .filter((item): item is AutoVisitQueueItem => Boolean(item));
 
@@ -412,7 +463,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         completingCycleRef.current = false;
       }
     },
-    [activeBatchIds, linksById, pickNextBatch, triggerCelebrationBurst]
+    [linksById, pickNextBatch, triggerCelebrationBurst]
   );
 
   // Auto-resume as soon as any cooled-down link becomes eligible again
@@ -601,14 +652,28 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           </div>
 
           <div className="flex shrink-0 items-center gap-1">
-            {!isMulti5Active && (
+            {isMulti5Active && onChangeVisitMode ? (
               <button
                 type="button"
-                onClick={onOpenProLocked}
-                className="rounded-lg border border-[#FFB800]/50 bg-[#FFB800]/15 px-2 py-1 text-[10px] font-bold text-[#FFD166] hover:bg-[#FFB800]/25"
+                onClick={() => onChangeVisitMode(isMultiRunning ? 'single' : 'multi')}
+                className={`rounded-lg border px-2 py-1 text-[10px] font-bold transition-colors ${
+                  isMultiRunning
+                    ? 'border-[#FF2E93]/55 bg-[#FF2E93]/20 text-[#FF9AD0] hover:bg-[#FF2E93]/30'
+                    : 'border-[#00F5FF]/50 bg-[#00F5FF]/15 text-[#00F5FF] hover:bg-[#00F5FF]/25'
+                }`}
               >
-                5x PRO
+                {isMultiRunning ? '5x ON' : '1x · Go 5x'}
               </button>
+            ) : (
+              !isMulti5Active && (
+                <button
+                  type="button"
+                  onClick={onOpenProLocked}
+                  className="rounded-lg border border-[#FFB800]/50 bg-[#FFB800]/15 px-2 py-1 text-[10px] font-bold text-[#FFD166] hover:bg-[#FFB800]/25"
+                >
+                  5x PRO
+                </button>
+              )
             )}
 
             <button
@@ -693,6 +758,9 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                         {status === 'done' && (
                           <span className="text-[9px] font-bold text-emerald-300">OK</span>
                         )}
+                        {status === 'error' && (
+                          <span className="text-[9px] font-bold text-rose-300">ERR</span>
+                        )}
                         <a
                           href={item.url}
                           target="_blank"
@@ -707,17 +775,22 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                     <iframe
                       src={item.url}
                       title={item.title}
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
                       referrerPolicy="no-referrer-when-downgrade"
                       loading="eager"
                       className={`w-full border-0 bg-white ${
-                        isMultiRunning && activeItems.length > 1 ? 'h-16' : 'h-24'
+                        isMultiRunning && activeItems.length > 1 ? 'h-20 sm:h-24' : 'h-24'
                       }`}
                     />
                   </div>
                 );
               })}
             </div>
+            {isMultiRunning && (
+              <p className="mt-1.5 text-[10px] text-slate-400">
+                Sites blocking frame previews still credit verified dwell cycles; tap ↗ on any slot to open directly.
+              </p>
+            )}
           </div>
         ) : (
           <div className="flex items-center justify-between border-t border-white/10 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-300">

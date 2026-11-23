@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   Clock,
@@ -158,6 +158,15 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   const [publishingUrl, setPublishingUrl] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const availableIds = new Set(availableLinks.map((l) => l.id));
+    setMultiBatchIds((prev) => {
+      if (prev.length === 0) return prev;
+      const next = prev.filter((id) => availableIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [availableLinks]);
+
   const statsCards = [
     {
       label: 'Visits',
@@ -230,17 +239,40 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 
   const recentLinkOpens = useMemo(() => myLinkVisits.slice(0, 5), [myLinkVisits]);
 
+  const pinnedBatchIdsSet = useMemo(
+    () => new Set(multiBatchIds),
+    [multiBatchIds]
+  );
+
   const multiBatchLinks = useMemo(() => {
     const availableById = new Map(availableLinks.map((l) => [l.id, l]));
-    const picked = multiBatchIds
-      .map((id) => availableById.get(id))
-      .filter((item): item is ManagedLink => Boolean(item))
-      .slice(0, 5);
-    if (picked.length > 0) return picked;
-    return availableLinks.slice(0, 5);
+    const picked: ManagedLink[] = [];
+    const usedIds = new Set<string>();
+
+    for (const id of multiBatchIds) {
+      if (picked.length >= 5) break;
+      const found = availableById.get(id);
+      if (found && !usedIds.has(found.id)) {
+        picked.push(found);
+        usedIds.add(found.id);
+      }
+    }
+
+    for (const candidate of availableLinks) {
+      if (picked.length >= 5) break;
+      if (!usedIds.has(candidate.id)) {
+        picked.push(candidate);
+        usedIds.add(candidate.id);
+      }
+    }
+
+    return picked;
   }, [availableLinks, multiBatchIds]);
 
   const toggleMultiBatchSelection = (linkId: string) => {
+    if (isMulti5Active && visitMode !== 'multi') {
+      onChangeVisitMode('multi');
+    }
     setMultiBatchIds((prev) => {
       if (prev.includes(linkId)) return prev.filter((id) => id !== linkId);
       if (prev.length >= 5) return [...prev.slice(1), linkId];
@@ -522,17 +554,28 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
           {/* Action / Multi Batch */}
           {isMulti5Active && visitMode === 'multi' ? (
             <div className="mt-4 space-y-3 rounded-2xl border border-[#FF2E93]/35 bg-[#090B21]/80 p-4 shadow-[0_0_24px_-10px_rgba(255,46,147,0.35)]">
-              <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-bold text-[#FF8DC7]">
                   Multi (5) Concurrent Queue ({multiBatchLinks.length}/5 slots)
                 </span>
-                <button
-                  type="button"
-                  onClick={onOpenProLocked}
-                  className="font-semibold text-[#00F5FF] hover:underline"
-                >
-                  Receipt
-                </button>
+                <div className="flex items-center gap-3">
+                  {multiBatchIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setMultiBatchIds([])}
+                      className="font-semibold text-slate-300 hover:text-white"
+                    >
+                      Clear Picks ({multiBatchIds.length})
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onOpenProLocked}
+                    className="font-semibold text-[#00F5FF] hover:underline"
+                  >
+                    {isAdmin ? 'PRO Status' : 'Receipt'}
+                  </button>
+                </div>
               </div>
 
               {multiBatchLinks.length === 0 ? (
@@ -569,9 +612,15 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                   >
                     <Play className="h-4 w-4" />
                     <span>
-                      Auto Visit All ({Math.min(5, availableLinks.length)} at once)
+                      Auto Visit All ({multiBatchLinks.length} at once)
                     </span>
                   </button>
+
+                  {availableLinks.length < 5 && (
+                    <p className="text-[11px] text-slate-300">
+                      {availableLinks.length} of 5 slots ready in {visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'} right now — extra slots fill automatically as more members publish or finish cooldown.
+                    </p>
+                  )}
 
                   <div className="space-y-2">
                     {multiBatchLinks.map((batchItem, idx) => (
@@ -586,6 +635,11 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                           <div className="min-w-0">
                             <p className="truncate text-xs font-semibold text-white">
                               {batchItem.title}
+                              {pinnedBatchIdsSet.has(batchItem.id) && (
+                                <span className="ml-1.5 text-[10px] font-bold text-[#00F5FF]">
+                                  · Pinned
+                                </span>
+                              )}
                             </p>
                             <p className="truncate text-[11px] text-slate-400">
                               {batchItem.domain} · {batchItem.category}
@@ -594,7 +648,12 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                         </div>
                         <button
                           type="button"
-                          onClick={() => onStartAutoVisit(batchItem.id)}
+                          onClick={() =>
+                            onStartAutoVisit(
+                              batchItem.id,
+                              multiBatchLinks.map((l) => l.id)
+                            )
+                          }
                           className="neon-btn-emerald flex min-h-[34px] shrink-0 items-center gap-1 rounded-lg px-3 py-1 text-xs font-bold"
                         >
                           <span>Visit</span>
@@ -892,7 +951,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                 0,
                 Math.ceil(((cooldowns[item.id] ?? 0) - nowMs) / 1000)
               );
-              const inBatch = multiBatchLinks.some((b) => b.id === item.id);
+              const inBatch = pinnedBatchIdsSet.has(item.id);
               const isOwn = item.ownerId === currentUid;
               const neonHoverBorder = [
                 'hover:border-[#00F5FF]/55 hover:shadow-[0_0_20px_-8px_rgba(0,245,255,0.45)]',
@@ -946,7 +1005,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                               : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10'
                           }`}
                         >
-                          {inBatch ? 'Selected' : '+ Batch'}
+                          {inBatch ? 'Pinned' : '+ Batch'}
                         </button>
                       )}
 
@@ -963,7 +1022,14 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => onStartAutoVisit(item.id)}
+                        onClick={() =>
+                          onStartAutoVisit(
+                            item.id,
+                            isMulti5Active && visitMode === 'multi'
+                              ? multiBatchLinks.map((l) => l.id)
+                              : undefined
+                          )
+                        }
                         className="neon-btn-primary flex min-h-[34px] items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold"
                       >
                         <Play className="h-3.5 w-3.5" />

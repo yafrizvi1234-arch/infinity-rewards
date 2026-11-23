@@ -7,11 +7,64 @@ export interface AvatarUploadResult {
   note: string;
 }
 
-const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/x-png', 'image/webp'];
+const ALLOWED_EXT_PATTERN = /\.(jpe?g|png|webp)$/i;
 const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5MB
 const STORAGE_UPLOAD_TIMEOUT_MS = 6000;
 const MAX_AVATAR_FALLBACK_CHARS = 130000;
 const MAX_SCREENSHOT_FALLBACK_CHARS = 230000;
+
+export function isSupportedImageFile(file: File): boolean {
+  const mimeType = (file.type || '').trim().toLowerCase();
+  if (ALLOWED_TYPES.includes(mimeType)) {
+    return true;
+  }
+  if (!mimeType || mimeType === 'application/octet-stream' || mimeType.startsWith('image/')) {
+    return ALLOWED_EXT_PATTERN.test(file.name || '');
+  }
+  return false;
+}
+
+interface DecodedImageSource {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  cleanup: () => void;
+}
+
+async function decodeImageFile(file: File): Promise<DecodedImageSource> {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        cleanup: () => bitmap.close(),
+      };
+    } catch {
+      // Fallback to HTMLImageElement below for mobile browsers/PNG edge cases
+    }
+  }
+
+  return await new Promise<DecodedImageSource>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      resolve({
+        source: img,
+        width: img.naturalWidth || img.width,
+        height: img.naturalHeight || img.height,
+        cleanup: () => URL.revokeObjectURL(objectUrl),
+      });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Could not decode this image file. Please select a JPG, PNG, or WebP image.'));
+    };
+    img.src = objectUrl;
+  });
+}
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -45,11 +98,11 @@ function canvasToJpegBlob(canvas: HTMLCanvasElement, quality: number, errorMessa
 async function compressImageToSquareJpeg(
   file: File
 ): Promise<{ blob: Blob; dataUrl: string }> {
-  const imageBitmap = await createImageBitmap(file);
+  const decoded = await decodeImageFile(file);
   try {
-    const minSide = Math.min(imageBitmap.width, imageBitmap.height);
-    const sx = (imageBitmap.width - minSide) / 2;
-    const sy = (imageBitmap.height - minSide) / 2;
+    const minSide = Math.min(decoded.width, decoded.height);
+    const sx = (decoded.width - minSide) / 2;
+    const sy = (decoded.height - minSide) / 2;
 
     const sizeSteps = [224, 180, 144];
     const qualitySteps = [0.82, 0.68, 0.54];
@@ -65,7 +118,7 @@ async function compressImageToSquareJpeg(
       if (!ctx) {
         throw new Error('Canvas 2D context is not available in this browser.');
       }
-      ctx.drawImage(imageBitmap, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
+      ctx.drawImage(decoded.source, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
 
       for (const quality of qualitySteps) {
         const candidate = canvas.toDataURL('image/jpeg', quality);
@@ -93,13 +146,12 @@ async function compressImageToSquareJpeg(
     );
     return { blob, dataUrl: bestDataUrl };
   } finally {
-    imageBitmap.close();
+    decoded.cleanup();
   }
 }
 
 export async function uploadProfileAvatar(uid: string, file: File): Promise<AvatarUploadResult> {
-  const mimeType = file.type.toLowerCase();
-  if (!ALLOWED_TYPES.includes(mimeType)) {
+  if (!isSupportedImageFile(file)) {
     throw new Error('Unsupported image format. Please choose a JPG, PNG, or WebP file.');
   }
   if (file.size > MAX_INPUT_BYTES) {
@@ -148,18 +200,18 @@ export interface ScreenshotUploadResult {
 async function compressPaymentScreenshotJpeg(
   file: File
 ): Promise<{ blob: Blob; dataUrl: string }> {
-  const imageBitmap = await createImageBitmap(file);
+  const decoded = await decodeImageFile(file);
   try {
-    const maxDimensionSteps = [900, 720, 560];
-    const qualitySteps = [0.78, 0.62, 0.48, 0.36];
+    const maxDimensionSteps = [900, 720, 560, 420];
+    const qualitySteps = [0.78, 0.62, 0.48, 0.34, 0.24];
     let bestDataUrl = '';
     let bestCanvas: HTMLCanvasElement | null = null;
     let bestQuality = 0.78;
 
     for (const maxDimension of maxDimensionSteps) {
-      const scale = Math.min(1, maxDimension / Math.max(imageBitmap.width, imageBitmap.height));
-      const width = Math.max(1, Math.round(imageBitmap.width * scale));
-      const height = Math.max(1, Math.round(imageBitmap.height * scale));
+      const scale = Math.min(1, maxDimension / Math.max(decoded.width, decoded.height));
+      const width = Math.max(1, Math.round(decoded.width * scale));
+      const height = Math.max(1, Math.round(decoded.height * scale));
 
       const canvas = document.createElement('canvas');
       canvas.width = width;
@@ -168,7 +220,7 @@ async function compressPaymentScreenshotJpeg(
       if (!ctx) {
         throw new Error('Canvas 2D context is not available in this browser.');
       }
-      ctx.drawImage(imageBitmap, 0, 0, width, height);
+      ctx.drawImage(decoded.source, 0, 0, width, height);
 
       for (const quality of qualitySteps) {
         const candidate = canvas.toDataURL('image/jpeg', quality);
@@ -196,7 +248,7 @@ async function compressPaymentScreenshotJpeg(
     );
     return { blob, dataUrl: bestDataUrl };
   } finally {
-    imageBitmap.close();
+    decoded.cleanup();
   }
 }
 
@@ -205,8 +257,7 @@ export async function uploadPaymentScreenshot(
   requestId: string,
   file: File
 ): Promise<ScreenshotUploadResult> {
-  const mimeType = file.type.toLowerCase();
-  if (!ALLOWED_TYPES.includes(mimeType)) {
+  if (!isSupportedImageFile(file)) {
     throw new Error('Unsupported screenshot format. Please upload a JPG, PNG, or WebP image.');
   }
   if (file.size > MAX_INPUT_BYTES) {

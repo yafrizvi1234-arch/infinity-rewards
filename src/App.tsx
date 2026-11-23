@@ -196,6 +196,7 @@ export default function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [isEmailVerified, setIsEmailVerified] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [adminCheckResolved, setAdminCheckResolved] = useState<boolean>(false);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [workspaceReady, setWorkspaceReady] = useState<boolean>(false);
   const [accountCreatedAtMs, setAccountCreatedAtMs] = useState<number | null>(null);
@@ -280,6 +281,7 @@ export default function App() {
     adminCheckSeqRef.current += 1;
     refreshingAdminKeyRef.current = null;
     setIsAdmin(false);
+    setAdminCheckResolved(false);
     setAdminAllLinks([]);
     setAdminReports([]);
     setAdminModerationLogs([]);
@@ -293,12 +295,14 @@ export default function App() {
       }
       const recent = lastForceCheckedRef.current;
       if (recent && recent.key === identityKey && Date.now() - recent.at < 3000) {
+        setAdminCheckResolved(true);
         return;
       }
 
       const seq = ++adminCheckSeqRef.current;
       if (lastIdentityKeyRef.current !== identityKey) {
         setIsAdmin(false);
+        setAdminCheckResolved(false);
         setAdminAllLinks([]);
         setAdminReports([]);
         setAdminModerationLogs([]);
@@ -314,6 +318,7 @@ export default function App() {
         const activeUser = auth.currentUser;
         if (!activeUser || activeUser.uid !== user.uid || !activeUser.emailVerified) {
           setIsAdmin(false);
+          setAdminCheckResolved(false);
           setAdminAllLinks([]);
           setAdminReports([]);
           setAdminModerationLogs([]);
@@ -321,6 +326,7 @@ export default function App() {
           return;
         }
         setIsAdmin(adminStatus);
+        setAdminCheckResolved(true);
         if (!adminStatus) {
           setAdminAllLinks([]);
           setAdminReports([]);
@@ -596,9 +602,11 @@ export default function App() {
     };
   }, [authUser, isEmailVerified, clearAdminSessionState, retryNonce]);
 
+  const isMulti5Active = isAdmin || Boolean(multiEntitlement?.active);
+
   // Automatically switch to Multi (5) once entitlement activates; fallback to Single if revoked
   useEffect(() => {
-    if (multiEntitlement?.active) {
+    if (isMulti5Active) {
       if (!autoEnabledMultiRef.current) {
         autoEnabledMultiRef.current = true;
         setVisitMode('multi');
@@ -609,7 +617,7 @@ export default function App() {
         setVisitMode('single');
       }
     }
-  }, [multiEntitlement, visitMode]);
+  }, [isMulti5Active, visitMode]);
 
   // Admin-only real-time moderation subscriptions
   useEffect(() => {
@@ -673,12 +681,40 @@ export default function App() {
     });
   }, [myLinkVisits, approvedLinks]);
 
-  // Guard admin screen access if user is not an admin
+  // Guard admin screen access only once async admin verification has completed
   useEffect(() => {
-    if (workspaceReady && state.activeScreen === 'admin' && !isAdmin) {
+    if (workspaceReady && adminCheckResolved && state.activeScreen === 'admin' && !isAdmin) {
       setState((prev) => ({ ...prev, activeScreen: 'home' }));
     }
-  }, [workspaceReady, state.activeScreen, isAdmin]);
+  }, [workspaceReady, adminCheckResolved, state.activeScreen, isAdmin]);
+
+  const refreshAdsterraBackendStatus = useCallback(async () => {
+    if (!authUser || !isEmailVerified) return;
+    try {
+      const status = await fetchAdsterraBackendStatus();
+      setAdsterraBackendStatus(status);
+    } catch {
+      setAdsterraBackendStatus(DEFAULT_BACKEND_STATUS);
+    }
+  }, [authUser, isEmailVerified]);
+
+  // Auto-retry Adsterra backend reachability when opening the Adsterra screen after cold starts
+  useEffect(() => {
+    if (
+      authUser &&
+      isEmailVerified &&
+      state.activeScreen === 'adsterra' &&
+      !adsterraBackendStatus.backendReachable
+    ) {
+      void refreshAdsterraBackendStatus();
+    }
+  }, [
+    authUser,
+    isEmailVerified,
+    state.activeScreen,
+    adsterraBackendStatus.backendReachable,
+    refreshAdsterraBackendStatus,
+  ]);
 
   // Persist lightweight UI preferences per UID
   useEffect(() => {
@@ -835,6 +871,7 @@ export default function App() {
         }
       }
 
+      let visitError: unknown = null;
       const statTask = visitStatsQueueRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -877,12 +914,17 @@ export default function App() {
               visitedToday: prev.visitedToday + 1,
             }));
           } catch (err) {
+            visitError = err;
             console.warn('Visit counter update skipped:', err);
           }
         });
 
       visitStatsQueueRef.current = statTask;
       await statTask;
+      if (visitError) {
+        setToastMessage('Visit sync delayed — please check your connection');
+        throw visitError;
+      }
     },
     [authUser]
   );
@@ -1093,18 +1135,21 @@ export default function App() {
     setToastMessage('Synced domains, placements & full Adsterra stats');
   };
 
-  const handleFetchAdsterraStats = async (params: {
-    preset: AdsterraDatePreset;
-    startDate?: string;
-    finishDate?: string;
-    domainId?: string;
-    placementId?: string;
-    country?: string;
-  }) => {
-    if (!authUser) return;
-    const nextBackendStatus = await fetchAdsterraDetailedStats(params);
-    setAdsterraBackendStatus(nextBackendStatus);
-  };
+  const handleFetchAdsterraStats = useCallback(
+    async (params: {
+      preset: AdsterraDatePreset;
+      startDate?: string;
+      finishDate?: string;
+      domainId?: string;
+      placementId?: string;
+      country?: string;
+    }) => {
+      if (!authUser) return;
+      const nextBackendStatus = await fetchAdsterraDetailedStats(params);
+      setAdsterraBackendStatus(nextBackendStatus);
+    },
+    [authUser]
+  );
 
   const handleDisconnectAdsterra = async () => {
     if (!authUser) return;
@@ -1402,7 +1447,6 @@ export default function App() {
     [autoVisitSession, communityQueueItems]
   );
 
-  const isMulti5Active = Boolean(multiEntitlement?.active);
   const hasPendingMultiPayment = useMemo(
     () => myPaymentRequests.some((req) => req.status === 'pending'),
     [myPaymentRequests]
@@ -1739,6 +1783,7 @@ export default function App() {
                   onCreatePersonalSmartlink={handleCreatePersonalSmartlink}
                   onDeletePersonalSmartlink={handleDeletePersonalSmartlink}
                   onPublishToCommunity={handlePublishSmartlinkToCommunity}
+                  onRefreshBackendStatus={refreshAdsterraBackendStatus}
                   onOpenProModal={() => setIsProModalOpen(true)}
                 />
               )}
@@ -1831,6 +1876,13 @@ export default function App() {
         visitMode={visitMode}
         cooldowns={state.cooldowns}
         nowMs={nowMs}
+        onChangeVisitMode={(mode) => {
+          if (mode === 'multi' && !isMulti5Active) {
+            setIsProModalOpen(true);
+            return;
+          }
+          setVisitMode(mode);
+        }}
         onCompleteLinkVisit={handleCompleteAutoVisit}
         onOpenProLocked={() => setIsProModalOpen(true)}
         onClose={() => setAutoVisitSession(null)}
@@ -1839,6 +1891,7 @@ export default function App() {
       <VisitModal
         reportTarget={reportTarget}
         isProModalOpen={isProModalOpen}
+        isAdmin={isAdmin}
         multiEntitlement={multiEntitlement}
         myPaymentRequests={myPaymentRequests}
         paymentConfig={paymentConfig}

@@ -82,6 +82,7 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
   onUpdatePaymentNumbers,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('pending');
+  const [hasPickedTabManually, setHasPickedTabManually] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [notesById, setNotesById] = useState<Record<string, string>>({});
   const [verifiedChecksById, setVerifiedChecksById] = useState<Record<string, boolean>>({});
@@ -117,6 +118,12 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
     () => reports.filter((r) => r.status === 'open'),
     [reports]
   );
+
+  useEffect(() => {
+    if (!hasPickedTabManually && pendingLinks.length === 0 && pendingPayments.length > 0) {
+      setActiveTab('payments');
+    }
+  }, [hasPickedTabManually, pendingLinks.length, pendingPayments.length]);
 
   const filteredLinks = useMemo(() => {
     const base = activeTab === 'pending' ? pendingLinks : allLinks;
@@ -305,7 +312,10 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => {
+                  setHasPickedTabManually(true);
+                  setActiveTab(tab.id);
+                }}
                 className={`min-h-[38px] rounded-lg px-3 py-1.5 text-xs font-semibold transition-all whitespace-nowrap ${
                   activeTab === tab.id
                     ? 'border border-[#00F5FF]/55 bg-gradient-to-r from-[#00F5FF]/20 via-[#B84DFF]/20 to-[#FF2E93]/20 text-white shadow-[0_0_12px_-4px_rgba(0,245,255,0.45)]'
@@ -774,12 +784,16 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
                           <div className="flex flex-wrap gap-2">
                             <button
                               type="button"
-                              disabled={busyId === req.id || !isVerifiedChecked}
+                              disabled={busyId === req.id}
                               onClick={() => handlePaymentDecision(req, 'approved')}
-                              className="neon-btn-emerald flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                              className={`neon-btn-emerald flex min-h-[40px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50 ${
+                                !isVerifiedChecked ? 'opacity-80' : ''
+                              }`}
                             >
                               <CheckCircle2 className="h-3.5 w-3.5" />
-                              <span>Approve &amp; Activate Multi (5)</span>
+                              <span>
+                                {busyId === req.id ? 'Activating...' : 'Approve & Activate Multi (5)'}
+                              </span>
                             </button>
                             <button
                               type="button"

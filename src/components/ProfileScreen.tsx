@@ -397,13 +397,13 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   <Camera className="h-4 w-4" />
                 )}
               </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={handleAvatarSelected}
-                className="hidden"
-              />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                  onChange={handleAvatarSelected}
+                  className="hidden"
+                />
             </div>
             <button
               type="button"

@@ -215,9 +215,22 @@ function toSafeStatusPayload(record: StoredSecretRecord | undefined) {
 }
 
 function decodeJwtPart(segment: string): Record<string, unknown> {
-  const padded = segment.replace(/-/g, '+').replace(/_/g, '/');
-  const json = Buffer.from(padded, 'base64').toString('utf8');
-  return JSON.parse(json) as Record<string, unknown>;
+  if (!segment) {
+    throw new Error('Malformed Firebase ID token.');
+  }
+  try {
+    const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+    const padLength = (4 - (base64.length % 4)) % 4;
+    const padded = base64 + '='.repeat(padLength);
+    const json = Buffer.from(padded, 'base64').toString('utf8');
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Malformed Firebase ID token.');
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error('Malformed Firebase ID token.');
+  }
 }
 
 async function getFirebasePublicCerts(): Promise<Record<string, string>> {
@@ -1087,6 +1100,29 @@ export function createApp() {
     }
   );
 
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  app.use('/api', (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    const errObj = err as { type?: string; status?: number; message?: string } | null;
+    if (errObj?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+      res.status(400).json({ error: 'Malformed JSON request body.' });
+      return;
+    }
+    if (errObj?.type === 'entity.too.large') {
+      res.status(413).json({ error: 'Request payload exceeds the 64KB limit.' });
+      return;
+    }
+    res.status(typeof errObj?.status === 'number' ? errObj.status : 500).json({
+      error: errObj?.message || 'Internal server error.',
+    });
+  });
+
   return app;
 }
 
@@ -1112,12 +1148,31 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.join(ROOT_DIR, 'dist');
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders(res, filePath) {
+          const base = path.basename(filePath);
+          if (
+            base === 'index.html' ||
+            base === 'sw.js' ||
+            base === 'registerSW.js' ||
+            base === 'manifest.webmanifest'
+          ) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.use((req, res, next) => {
-      if (req.method !== 'GET' || req.path.startsWith('/api/')) {
+      if (
+        req.method !== 'GET' ||
+        req.path.startsWith('/api/') ||
+        path.extname(req.path) !== ''
+      ) {
         next();
         return;
       }
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

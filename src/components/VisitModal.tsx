@@ -17,6 +17,7 @@ import {
   PAYMENT_CHANNELS,
   normalizeAndValidateTransactionId,
 } from '../services/paymentService';
+import { isSupportedImageFile } from '../services/storageService';
 import {
   ManagedLink,
   MultiEntitlementRecord,
@@ -28,6 +29,7 @@ import {
 interface VisitModalProps {
   reportTarget: ManagedLink | null;
   isProModalOpen: boolean;
+  isAdmin?: boolean;
   multiEntitlement: MultiEntitlementRecord | null;
   myPaymentRequests: PaymentRequestRecord[];
   paymentConfig: PaymentNumbersConfig;
@@ -60,6 +62,7 @@ function formatPaymentTime(ms: number): string {
 export const VisitModal: React.FC<VisitModalProps> = ({
   reportTarget,
   isProModalOpen,
+  isAdmin = false,
   multiEntitlement,
   myPaymentRequests,
   paymentConfig,
@@ -110,7 +113,7 @@ export const VisitModal: React.FC<VisitModalProps> = ({
 
   const latestPaymentRequest = myPaymentRequests[0] ?? null;
   const pendingRequest = myPaymentRequests.find((r) => r.status === 'pending') ?? null;
-  const isMultiActive = Boolean(multiEntitlement?.active);
+  const isMultiActive = isAdmin || Boolean(multiEntitlement?.active);
   const selectedChannel = PAYMENT_CHANNELS[paymentMethod];
   const activePaymentNumber =
     paymentMethod === 'nagad' ? paymentConfig.nagadNumber : paymentConfig.bkashNumber;
@@ -131,7 +134,7 @@ export const VisitModal: React.FC<VisitModalProps> = ({
     setPaymentError(null);
     if (!file) return;
 
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    if (!isSupportedImageFile(file)) {
       setPaymentError('Please upload a JPG, PNG, or WebP payment screenshot.');
       return;
     }
@@ -252,31 +255,48 @@ export const VisitModal: React.FC<VisitModalProps> = ({
           </div>
 
           {/* STATE 1: Multi (5) Already Approved & Active */}
-          {isMultiActive && multiEntitlement && (
+          {isMultiActive && (
             <div className="mt-5 space-y-4">
               <div className="neon-card-green rounded-2xl p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-[#00FF87]">
                   <CheckCircle2 className="h-4 w-4" />
-                  <span>Multi (5) Active on Your Account</span>
+                  <span>
+                    {multiEntitlement
+                      ? 'Multi (5) Active on Your Account'
+                      : 'Admin Multi (5) PRO Access Active'}
+                  </span>
                 </div>
                 <p className="mt-1.5 text-xs leading-relaxed text-slate-200">
-                  You can now run 5 smartlinks simultaneously in the compact bottom auto-visit dock
-                  and cycle through every link automatically.
+                  You can now run up to 5 links simultaneously in the compact bottom auto-visit dock
+                  and cycle through every member link automatically.
                 </p>
-                <div className="mt-3 grid grid-cols-2 gap-2 border-t border-white/10 pt-3 text-xs">
-                  <div>
-                    <p className="text-slate-400">Verified TxID</p>
-                    <p className="font-mono-num mt-0.5 font-semibold text-white">
-                      {multiEntitlement.transactionId}
-                    </p>
+                {multiEntitlement ? (
+                  <div className="mt-3 grid grid-cols-2 gap-2 border-t border-white/10 pt-3 text-xs">
+                    <div>
+                      <p className="text-slate-400">Verified TxID</p>
+                      <p className="font-mono-num mt-0.5 font-semibold text-white">
+                        {multiEntitlement.transactionId}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-400">Activated On</p>
+                      <p className="mt-0.5 font-medium text-slate-200">
+                        {formatPaymentTime(multiEntitlement.activatedAtMs)}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-slate-400">Activated On</p>
-                    <p className="mt-0.5 font-medium text-slate-200">
-                      {formatPaymentTime(multiEntitlement.activatedAtMs)}
-                    </p>
+                ) : (
+                  <div className="mt-3 grid grid-cols-2 gap-2 border-t border-white/10 pt-3 text-xs">
+                    <div>
+                      <p className="text-slate-400">Access Tier</p>
+                      <p className="font-mono-num mt-0.5 font-semibold text-white">Verified Admin</p>
+                    </div>
+                    <div>
+                      <p className="text-slate-400">Concurrent Slots</p>
+                      <p className="font-mono-num mt-0.5 font-medium text-slate-200">5 Links</p>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
 
               <button
@@ -500,7 +520,7 @@ export const VisitModal: React.FC<VisitModalProps> = ({
                 <input
                   ref={screenshotInputRef}
                   type="file"
-                  accept="image/jpeg,image/png,image/webp"
+                  accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
                   onChange={handleScreenshotSelected}
                   className="hidden"
                 />
