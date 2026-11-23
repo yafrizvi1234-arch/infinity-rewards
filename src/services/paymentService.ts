@@ -309,6 +309,12 @@ export async function reviewPaymentRequestSecure(params: {
     if (!paymentReq.transactionId || !paymentReq.screenshotUrl || paymentReq.amountBdt !== MULTI5_PRICE_BDT) {
       throw new Error('Incomplete payment proof: cannot approve without valid 50 BDT proof.');
     }
+    const existingEntitlement = await getDoc(doc(db, 'multiEntitlements', paymentReq.uid));
+    if (existingEntitlement.exists()) {
+      throw new Error(
+        'Multi (5) is already active for this applicant. Please reject duplicate requests instead.'
+      );
+    }
   }
 
   const cleanNote = (adminNote ?? '').trim().slice(0, 240);
@@ -342,6 +348,42 @@ export async function reviewPaymentRequestSecure(params: {
       activatedAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+  }
+
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `paymentRequests/${paymentReq.id}`);
+  }
+}
+
+export async function revokeMulti5PaymentAccessSecure(params: {
+  request: PaymentRequestRecord;
+  adminNote?: string;
+}): Promise<void> {
+  const adminSession = await assertVerifiedAdminSession();
+  const { request: paymentReq, adminNote } = params;
+
+  if (paymentReq.status !== 'approved') {
+    throw new Error('Only approved Multi (5) requests can be revoked.');
+  }
+
+  const cleanNote = (adminNote ?? '').trim().slice(0, 240);
+  const batch = writeBatch(db);
+
+  batch.update(doc(db, 'paymentRequests', paymentReq.id), {
+    status: 'rejected',
+    adminNote: cleanNote || 'Multi (5) access revoked by administrator.',
+    reviewedBy: adminSession.uid,
+    reviewedByEmail: adminSession.email.slice(0, 120),
+    reviewedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  const entitlementRef = doc(db, 'multiEntitlements', paymentReq.uid);
+  const entitlementSnap = await getDoc(entitlementRef);
+  if (entitlementSnap.exists()) {
+    batch.delete(entitlementRef);
   }
 
   try {

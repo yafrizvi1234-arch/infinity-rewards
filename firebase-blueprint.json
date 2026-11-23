@@ -1070,7 +1070,7 @@
     },
     "/multiEntitlements/{userId}": {
       "schema": { "$ref": "#/entities/MultiEntitlement" },
-      "description": "Per-user Multi (5) activation state writable exclusively by verified admin with an approved payment request."
+      "description": "Per-user Multi (5) activation state writable and revocable exclusively by verified admin."
     },
     "/paymentConfig/{configId}": {
       "schema": { "$ref": "#/entities/PaymentConfig" },

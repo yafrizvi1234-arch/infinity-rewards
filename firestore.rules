@@ -1133,7 +1133,6 @@ service cloud.firestore {
       allow update: if isValidId(requestId)
         && isAdmin()
         && isValidPaymentRequest(incoming(), requestId)
-        && existing().status == 'pending'
         && incoming().status in ['approved', 'rejected']
         && incoming().id == existing().id
         && incoming().uid == existing().uid
@@ -1157,20 +1156,30 @@ service cloud.firestore {
           'updatedAt'
         ])
         && (
-          incoming().status == 'rejected'
+          (
+            existing().status == 'pending'
+            && (
+              incoming().status == 'rejected'
+              || (
+                incoming().status == 'approved'
+                && existsAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid))
+                && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.uid == existing().uid
+                && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.active == true
+                && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.sourceRequestId == requestId
+              )
+            )
+          )
           || (
-            incoming().status == 'approved'
-            && existsAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid))
-            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.uid == existing().uid
-            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.active == true
-            && getAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid)).data.sourceRequestId == requestId
+            existing().status == 'approved'
+            && incoming().status == 'rejected'
+            && !existsAfter(/databases/$(database)/documents/multiEntitlements/$(existing().uid))
           )
         );
 
       allow delete: if false;
     }
 
-    // Verified Multi (5) Entitlements (Strictly Admin-Activated Linked to Approved Payment)
+    // Verified Multi (5) Entitlements (Strictly Admin-Activated & Admin-Revocable)
     match /multiEntitlements/{userId} {
       allow get: if isValidId(userId)
         && isVerifiedUser()
@@ -1191,7 +1200,9 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.amountBdt == 50
         && getAfter(/databases/$(database)/documents/paymentRequests/$(incoming().sourceRequestId)).data.transactionId == incoming().transactionId;
 
-      allow update, delete: if false;
+      allow update: if false;
+
+      allow delete: if isValidId(userId) && isAdmin();
     }
 
     // Admin-Managed bKash & Nagad Personal Payment Numbers (Readable by Verified Users, Writable Only by Admin)

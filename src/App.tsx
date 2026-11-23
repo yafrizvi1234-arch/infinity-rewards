@@ -42,6 +42,7 @@ import {
 import {
   DEFAULT_PAYMENT_NUMBERS,
   reviewPaymentRequestSecure,
+  revokeMulti5PaymentAccessSecure,
   submitMulti5PaymentRequest,
   subscribeAdminPaymentRequests,
   subscribeMyMultiEntitlement,
@@ -1083,6 +1084,18 @@ export default function App() {
     );
   };
 
+  const handleRevokeMultiPayment = async (
+    request: PaymentRequestRecord,
+    adminNote: string
+  ) => {
+    if (!authUser) return;
+    await revokeMulti5PaymentAccessSecure({
+      request,
+      adminNote,
+    });
+    setToastMessage(`Multi (5) access revoked for ${request.userName}`);
+  };
+
   const handleUpdatePaymentNumbers = async (numbers: {
     bkashNumber: string;
     nagadNumber: string;
@@ -1735,6 +1748,7 @@ export default function App() {
                   onRemoveLink={handleAdminRemoveLink}
                   onResolveReport={handleResolveReport}
                   onReviewPaymentRequest={handleReviewPaymentRequest}
+                  onRevokeMultiPayment={handleRevokeMultiPayment}
                   onUpdatePaymentNumbers={handleUpdatePaymentNumbers}
                 />
               )}

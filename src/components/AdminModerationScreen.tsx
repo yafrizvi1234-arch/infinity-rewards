@@ -46,6 +46,7 @@ interface AdminModerationScreenProps {
     adminNote: string,
     verifiedProof?: boolean
   ) => Promise<void>;
+  onRevokeMultiPayment: (request: PaymentRequestRecord, adminNote: string) => Promise<void>;
   onUpdatePaymentNumbers: (numbers: {
     bkashNumber: string;
     nagadNumber: string;
@@ -79,6 +80,7 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
   onRemoveLink,
   onResolveReport,
   onReviewPaymentRequest,
+  onRevokeMultiPayment,
   onUpdatePaymentNumbers,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('pending');
@@ -88,6 +90,7 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
   const [verifiedChecksById, setVerifiedChecksById] = useState<Record<string, boolean>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [previewScreenshotUrl, setPreviewScreenshotUrl] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -199,6 +202,20 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
       await onReviewPaymentRequest(request, decision, notesById[request.id] || '', isVerified);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Payment review failed.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRevokePayment = async (request: PaymentRequestRecord) => {
+    if (busyId) return;
+    setActionError(null);
+    setBusyId(request.id);
+    try {
+      await onRevokeMultiPayment(request, notesById[request.id] || '');
+      setConfirmRevokeId(null);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to revoke Multi (5) access.');
     } finally {
       setBusyId(null);
     }
@@ -808,11 +825,57 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
                         </div>
                       </div>
                     ) : (
-                      req.adminNote && (
-                        <p className="border-t border-white/10 pt-2.5 text-xs text-slate-400">
-                          Admin Note: {req.adminNote}
-                        </p>
-                      )
+                      <div className="space-y-2.5 border-t border-white/10 pt-2.5">
+                        {req.adminNote && (
+                          <p className="text-xs text-slate-400">Admin Note: {req.adminNote}</p>
+                        )}
+                        {req.status === 'approved' && (
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <input
+                              type="text"
+                              maxLength={240}
+                              value={notesById[req.id] ?? ''}
+                              onChange={(e) =>
+                                setNotesById((prev) => ({ ...prev, [req.id]: e.target.value }))
+                              }
+                              placeholder="Optional revoke reason..."
+                              className="min-h-[38px] flex-1 rounded-xl border border-white/15 bg-slate-950/70 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-rose-400 focus:outline-none"
+                            />
+                            <div className="flex flex-wrap items-center gap-2">
+                              {confirmRevokeId === req.id ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={busyId === req.id}
+                                    onClick={() => handleRevokePayment(req)}
+                                    className="min-h-[38px] rounded-xl border border-rose-400/55 bg-rose-500/25 px-3 py-1.5 text-xs font-bold text-rose-100 hover:bg-rose-500/35 disabled:opacity-50"
+                                  >
+                                    {busyId === req.id ? 'Revoking...' : 'Confirm Revoke'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busyId === req.id}
+                                    onClick={() => setConfirmRevokeId(null)}
+                                    className="min-h-[38px] rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/10"
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={busyId === req.id}
+                                  onClick={() => setConfirmRevokeId(req.id)}
+                                  className="flex min-h-[38px] items-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-500/15 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                                >
+                                  <XCircle className="h-3.5 w-3.5" />
+                                  <span>Revoke Multi (5)</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
