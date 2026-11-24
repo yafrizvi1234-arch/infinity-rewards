@@ -5,9 +5,13 @@ import {
   ChevronUp,
   Clock,
   ExternalLink,
+  Globe,
   Layers,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
+  ShieldCheck,
   SkipForward,
   Sparkles,
   X,
@@ -42,7 +46,7 @@ interface BottomVisitDockProps {
   onClose: () => void;
 }
 
-type SlotVisitState = 'visiting' | 'processing' | 'done' | 'error';
+type SlotVisitState = 'queued' | 'visiting' | 'processing' | 'done' | 'error';
 
 interface SparkParticle {
   id: number;
@@ -61,9 +65,55 @@ interface CelebrationBurst {
   count: number;
 }
 
-const CYCLE_DURATION_SEC = 8;
+const SINGLE_DWELL_MIN_SEC = 18;
+const SINGLE_DWELL_MAX_SEC = 26;
+const STAGGER_MIN_MS = 4000;
+const STAGGER_MAX_MS = 7500;
+const POST_LAST_OPEN_MIN_SEC = 14;
+const POST_LAST_OPEN_MAX_SEC = 18;
+const TICK_INTERVAL_MS = 250;
 const MULTI_CONCURRENCY_LIMIT = 5;
 const CELEBRATION_DURATION_MS = 950;
+
+function randomInt(min: number, max: number): number {
+  const low = Math.ceil(min);
+  const high = Math.floor(max);
+  return Math.floor(Math.random() * (high - low + 1)) + low;
+}
+
+function buildStaggerSchedule(batchIds: string[]): {
+  openAtMsById: Record<string, number>;
+  cycleDurationSec: number;
+} {
+  const openAtMsById: Record<string, number> = {};
+  if (batchIds.length === 0) {
+    return { openAtMsById, cycleDurationSec: SINGLE_DWELL_MIN_SEC };
+  }
+
+  let cumulativeMs = 0;
+  batchIds.forEach((id, idx) => {
+    if (idx === 0) {
+      openAtMsById[id] = 0;
+    } else {
+      cumulativeMs += randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
+      openAtMsById[id] = cumulativeMs;
+    }
+  });
+
+  if (batchIds.length === 1) {
+    return {
+      openAtMsById,
+      cycleDurationSec: randomInt(SINGLE_DWELL_MIN_SEC, SINGLE_DWELL_MAX_SEC),
+    };
+  }
+
+  const lastOpenSec = Math.ceil(cumulativeMs / 1000);
+  const postLastDwellSec = randomInt(POST_LAST_OPEN_MIN_SEC, POST_LAST_OPEN_MAX_SEC);
+  return {
+    openAtMsById,
+    cycleDurationSec: Math.max(32, lastOpenSec + postLastDwellSec),
+  };
+}
 
 const SPARK_PARTICLES: SparkParticle[] = [
   { id: 0, dx: -38, dy: -42, rotate: -65, delay: 0.0, sizeClass: 'h-1.5 w-1.5 rounded-full', colorClass: 'bg-[#00F5FF]', originLeftClass: 'left-7' },
@@ -105,15 +155,23 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
   const [isPaused, setIsPaused] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
-  const [remainingSec, setRemainingSec] = useState(CYCLE_DURATION_SEC);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [cycleDurationSec, setCycleDurationSec] = useState(SINGLE_DWELL_MIN_SEC);
+  const [elapsedActiveMs, setElapsedActiveMs] = useState(0);
   const [activeBatchIds, setActiveBatchIds] = useState<string[]>([]);
+  const [openAtMsById, setOpenAtMsById] = useState<Record<string, number>>({});
+  const [focusedSlotId, setFocusedSlotId] = useState<string | null>(null);
   const [slotStates, setSlotStates] = useState<Record<string, SlotVisitState>>({});
   const [isProcessingBatch, setIsProcessingBatch] = useState(false);
   const [completedCount, setCompletedCount] = useState(0);
   const [celebrationBurst, setCelebrationBurst] = useState<CelebrationBurst | null>(null);
 
   const cursorRef = useRef(0);
-  const remainingSecRef = useRef(CYCLE_DURATION_SEC);
+  const elapsedActiveMsRef = useRef(0);
+  const cycleDurationSecRef = useRef(SINGLE_DWELL_MIN_SEC);
+  const openAtMsByIdRef = useRef<Record<string, number>>({});
+  const userSelectedTabInBatchRef = useRef(false);
+  const lastAutoFocusedIdRef = useRef<string | null>(null);
   const localHoldUntilRef = useRef<Record<string, number>>({});
   const completingCycleRef = useRef(false);
   const sessionTokenRef = useRef(0);
@@ -180,6 +238,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     return Math.max(cooldownsRef.current[item.id] ?? 0, localHoldUntilRef.current[item.id] ?? 0);
   }, []);
 
+  // Pick next batch prioritizing distinct owners/domains so no single publisher fires repeatedly in the same burst
   const pickNextBatch = useCallback(
     (
       preferredFirstId?: string | null,
@@ -192,21 +251,27 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       const limit = Math.max(1, limitOverride ?? concurrencyLimitRef.current);
       const currentNow = Date.now();
 
-      // Strictly respect individual link cooldowns — only select links whose cooldown expired
       const ready = pool.filter((item) => getEffectiveCooldownEnd(item) <= currentNow);
       if (ready.length === 0) return [];
 
       const picked: AutoVisitQueueItem[] = [];
       const usedIds = new Set<string>();
+      const usedOwners = new Set<string>();
+      const usedDomains = new Set<string>();
+
+      const addCandidate = (item: AutoVisitQueueItem) => {
+        picked.push(item);
+        usedIds.add(item.id);
+        if (item.managedLink?.ownerId) usedOwners.add(item.managedLink.ownerId);
+        if (item.domain) usedDomains.add(item.domain.toLowerCase());
+      };
 
       let startIdx = cursorRef.current % ready.length;
 
       if (preferredFirstId) {
         const preferredReadyIdx = ready.findIndex((item) => item.id === preferredFirstId);
         if (preferredReadyIdx >= 0) {
-          const preferred = ready[preferredReadyIdx];
-          picked.push(preferred);
-          usedIds.add(preferred.id);
+          addCandidate(ready[preferredReadyIdx]);
           startIdx = (preferredReadyIdx + 1) % ready.length;
         }
       }
@@ -216,18 +281,26 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           if (picked.length >= limit) break;
           if (usedIds.has(prefId)) continue;
           const candidate = ready.find((item) => item.id === prefId);
-          if (candidate) {
-            picked.push(candidate);
-            usedIds.add(candidate.id);
-          }
+          if (candidate) addCandidate(candidate);
         }
       }
 
+      // Pass 1: diversify by distinct publisher & domain
+      for (let offset = 0; offset < ready.length && picked.length < limit; offset++) {
+        const candidate = ready[(startIdx + offset) % ready.length];
+        if (usedIds.has(candidate.id)) continue;
+        const ownerId = candidate.managedLink?.ownerId || '';
+        const domainKey = candidate.domain.toLowerCase();
+        if (ownerId && usedOwners.has(ownerId)) continue;
+        if (domainKey && usedDomains.has(domainKey)) continue;
+        addCandidate(candidate);
+      }
+
+      // Pass 2: fill any remaining slots if fewer unique publishers/domains are ready
       for (let offset = 0; offset < ready.length && picked.length < limit; offset++) {
         const candidate = ready[(startIdx + offset) % ready.length];
         if (!usedIds.has(candidate.id)) {
-          picked.push(candidate);
-          usedIds.add(candidate.id);
+          addCandidate(candidate);
         }
       }
 
@@ -237,6 +310,27 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     [getEffectiveCooldownEnd]
   );
 
+  const initializeBatchSchedule = useCallback((batchIds: string[]) => {
+    const schedule = buildStaggerSchedule(batchIds);
+    elapsedActiveMsRef.current = 0;
+    cycleDurationSecRef.current = schedule.cycleDurationSec;
+    openAtMsByIdRef.current = schedule.openAtMsById;
+    userSelectedTabInBatchRef.current = false;
+    lastAutoFocusedIdRef.current = batchIds[0] ?? null;
+
+    setElapsedActiveMs(0);
+    setCycleDurationSec(schedule.cycleDurationSec);
+    setOpenAtMsById(schedule.openAtMsById);
+    setActiveBatchIds(batchIds);
+    setFocusedSlotId(batchIds[0] ?? null);
+
+    const initStates: Record<string, SlotVisitState> = {};
+    for (const id of batchIds) {
+      initStates[id] = (schedule.openAtMsById[id] ?? 0) === 0 ? 'visiting' : 'queued';
+    }
+    setSlotStates(initStates);
+  }, []);
+
   // Reset / start session when dock opens or user explicitly starts a new Visit session
   useEffect(() => {
     sessionTokenRef.current += 1;
@@ -245,11 +339,17 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       clearCelebrationTimer();
       setCelebrationBurst(null);
       setActiveBatchIds([]);
+      setOpenAtMsById({});
+      openAtMsByIdRef.current = {};
+      setFocusedSlotId(null);
       setSlotStates({});
       setIsProcessingBatch(false);
       setIsPaused(false);
-      remainingSecRef.current = CYCLE_DURATION_SEC;
-      setRemainingSec(CYCLE_DURATION_SEC);
+      setIsExpanded(false);
+      elapsedActiveMsRef.current = 0;
+      setElapsedActiveMs(0);
+      cycleDurationSecRef.current = SINGLE_DWELL_MIN_SEC;
+      setCycleDurationSec(SINGLE_DWELL_MIN_SEC);
       completingCycleRef.current = false;
       return;
     }
@@ -259,20 +359,13 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     completingCycleRef.current = false;
     setIsPaused(false);
     setIsProcessingBatch(false);
-    remainingSecRef.current = CYCLE_DURATION_SEC;
-    setRemainingSec(CYCLE_DURATION_SEC);
 
     const initialBatch = pickNextBatch(
       initialLinkId,
       concurrencyLimit,
       preferredBatchIdsRef.current
     );
-    setActiveBatchIds(initialBatch);
-    const initStates: Record<string, SlotVisitState> = {};
-    for (const id of initialBatch) {
-      initStates[id] = 'visiting';
-    }
-    setSlotStates(initStates);
+    initializeBatchSchedule(initialBatch);
     // Intentionally reset only on open, sessionNonce, or explicit initialLinkId trigger
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, sessionNonce, initialLinkId]);
@@ -291,19 +384,13 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     if (valid.length === 0) {
       const nextBatch = pickNextBatch(null, concurrencyLimit, preferredBatchIdsRef.current);
       if (nextBatch.length === 0 && prev.length === 0) return;
-      setActiveBatchIds(nextBatch);
-      const nextStates: Record<string, SlotVisitState> = {};
-      for (const id of nextBatch) {
-        nextStates[id] = 'visiting';
-      }
-      setSlotStates(nextStates);
-      remainingSecRef.current = CYCLE_DURATION_SEC;
-      setRemainingSec(CYCLE_DURATION_SEC);
+      initializeBatchSchedule(nextBatch);
       return;
     }
 
     if (valid.length > concurrencyLimit) {
-      setActiveBatchIds(valid.slice(0, concurrencyLimit));
+      const sliced = valid.slice(0, concurrencyLimit);
+      initializeBatchSchedule(sliced);
       return;
     }
 
@@ -340,11 +427,31 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         if (ready.length > 0) {
           cursorRef.current = (cursorRef.current + extras.length) % ready.length;
         }
-        setActiveBatchIds([...valid, ...extras]);
+        const combined = [...valid, ...extras];
+        const nextOpenAt = { ...openAtMsByIdRef.current };
+        let maxScheduled = 0;
+        for (const id of valid) {
+          maxScheduled = Math.max(maxScheduled, nextOpenAt[id] ?? 0);
+        }
+        let cursorMs = Math.max(elapsedActiveMsRef.current, maxScheduled);
+        for (const extraId of extras) {
+          cursorMs += randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
+          nextOpenAt[extraId] = cursorMs;
+        }
+        const nextTotalSec = Math.max(
+          cycleDurationSecRef.current,
+          Math.ceil(cursorMs / 1000) + randomInt(POST_LAST_OPEN_MIN_SEC, POST_LAST_OPEN_MAX_SEC)
+        );
+        openAtMsByIdRef.current = nextOpenAt;
+        cycleDurationSecRef.current = nextTotalSec;
+        setOpenAtMsById(nextOpenAt);
+        setCycleDurationSec(nextTotalSec);
+        setActiveBatchIds(combined);
         setSlotStates((prevStates) => {
           const updated = { ...prevStates };
           for (const extraId of extras) {
-            if (!updated[extraId]) updated[extraId] = 'visiting';
+            updated[extraId] =
+              elapsedActiveMsRef.current >= (nextOpenAt[extraId] ?? 0) ? 'visiting' : 'queued';
           }
           return updated;
         });
@@ -354,8 +461,20 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
     if (valid.length !== prev.length) {
       setActiveBatchIds(valid);
+      if (focusedSlotId && !valid.includes(focusedSlotId)) {
+        setFocusedSlotId(valid[0] ?? null);
+      }
     }
-  }, [concurrencyLimit, getEffectiveCooldownEnd, isOpen, links, linksById, pickNextBatch]);
+  }, [
+    concurrencyLimit,
+    focusedSlotId,
+    getEffectiveCooldownEnd,
+    initializeBatchSchedule,
+    isOpen,
+    links,
+    linksById,
+    pickNextBatch,
+  ]);
 
   const activeItems = useMemo(
     () =>
@@ -403,18 +522,23 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
         if (recordCurrent && snapshot.length > 0) {
           setIsProcessingBatch(true);
+          const openedSnapshot = snapshot.filter(
+            (item) => elapsedActiveMsRef.current >= (openAtMsByIdRef.current[item.id] ?? 0)
+          );
+          const batchSlice = (openedSnapshot.length > 0 ? openedSnapshot : snapshot).slice(
+            0,
+            concurrencyLimitRef.current
+          );
+
           const processingStates: Record<string, SlotVisitState> = {};
-          for (const item of snapshot) {
+          for (const item of batchSlice) {
             processingStates[item.id] = 'processing';
           }
-          setSlotStates(processingStates);
+          setSlotStates((prev) => ({ ...prev, ...processingStates }));
 
-          // Concurrent execution of up to 5 links (or 1 in Single mode) using Promise.all
-          // while enforcing each link's individual cooldown window.
-          const batchSlice = snapshot.slice(0, concurrencyLimitRef.current);
           const results = await Promise.all(
             batchSlice.map(async (item) => {
-              const cooldownMs = Math.max(15, item.cooldownSec || 60) * 1000;
+              const cooldownMs = Math.max(30, item.cooldownSec || 60) * 1000;
               try {
                 await onCompleteLinkVisitRef.current(item);
                 localHoldUntilRef.current[item.id] = Date.now() + cooldownMs;
@@ -448,14 +572,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         }
 
         const nextBatch = pickNextBatch(null, concurrencyLimitRef.current);
-        setActiveBatchIds(nextBatch);
-        const nextStates: Record<string, SlotVisitState> = {};
-        for (const id of nextBatch) {
-          nextStates[id] = 'visiting';
-        }
-        setSlotStates(nextStates);
-        remainingSecRef.current = CYCLE_DURATION_SEC;
-        setRemainingSec(CYCLE_DURATION_SEC);
+        initializeBatchSchedule(nextBatch);
       } finally {
         if (sessionTokenRef.current === activeSessionToken) {
           setIsProcessingBatch(false);
@@ -463,7 +580,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         completingCycleRef.current = false;
       }
     },
-    [linksById, pickNextBatch, triggerCelebrationBurst]
+    [initializeBatchSchedule, linksById, pickNextBatch, triggerCelebrationBurst]
   );
 
   // Auto-resume as soon as any cooled-down link becomes eligible again
@@ -473,61 +590,113 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     }
     const readyNow = pickNextBatch(null, concurrencyLimit);
     if (readyNow.length > 0) {
-      setActiveBatchIds(readyNow);
-      const nextStates: Record<string, SlotVisitState> = {};
-      for (const id of readyNow) {
-        nextStates[id] = 'visiting';
-      }
-      setSlotStates(nextStates);
-      remainingSecRef.current = CYCLE_DURATION_SEC;
-      setRemainingSec(CYCLE_DURATION_SEC);
+      initializeBatchSchedule(readyNow);
     }
-  }, [activeItems.length, concurrencyLimit, isOpen, isPaused, isProcessingBatch, links.length, nowMs, pickNextBatch]);
+  }, [
+    activeItems.length,
+    concurrencyLimit,
+    initializeBatchSchedule,
+    isOpen,
+    isPaused,
+    isProcessingBatch,
+    links.length,
+    nowMs,
+    pickNextBatch,
+  ]);
 
   const executeConcurrentBatchRef = useRef(executeConcurrentBatch);
   executeConcurrentBatchRef.current = executeConcurrentBatch;
 
-  // 1-second timer countdown for active concurrent batch
+  // High-precision active timer (250ms tick) that drives staggered 4–7.5s openings & random cycle end
   useEffect(() => {
     if (!isOpen || isPaused || isProcessingBatch || activeItems.length === 0) return;
 
     const timer = window.setInterval(() => {
-      if (remainingSecRef.current <= 1) {
-        remainingSecRef.current = CYCLE_DURATION_SEC;
-        setRemainingSec(CYCLE_DURATION_SEC);
+      const nextElapsed = elapsedActiveMsRef.current + TICK_INTERVAL_MS;
+      const totalCycleMs = cycleDurationSecRef.current * 1000;
+
+      if (nextElapsed >= totalCycleMs) {
+        elapsedActiveMsRef.current = totalCycleMs;
+        setElapsedActiveMs(totalCycleMs);
         void executeConcurrentBatchRef.current(true);
         return;
       }
-      remainingSecRef.current -= 1;
-      setRemainingSec(remainingSecRef.current);
-    }, 1000);
+
+      elapsedActiveMsRef.current = nextElapsed;
+      setElapsedActiveMs(nextElapsed);
+
+      // Unlock staggered slots as their randomized delay arrives
+      const schedule = openAtMsByIdRef.current;
+      let newlyOpenedId: string | null = null;
+
+      setSlotStates((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const id of activeBatchIdsRef.current) {
+          const openAt = schedule[id] ?? 0;
+          if (nextElapsed >= openAt && next[id] === 'queued') {
+            next[id] = 'visiting';
+            newlyOpenedId = id;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+
+      if (
+        newlyOpenedId &&
+        !userSelectedTabInBatchRef.current &&
+        lastAutoFocusedIdRef.current !== newlyOpenedId
+      ) {
+        lastAutoFocusedIdRef.current = newlyOpenedId;
+        setFocusedSlotId(newlyOpenedId);
+      }
+    }, TICK_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
   }, [activeItems.length, isOpen, isPaused, isProcessingBatch]);
 
   if (!isOpen) return null;
 
+  const remainingSec = Math.max(
+    0,
+    cycleDurationSec - Math.floor(elapsedActiveMs / 1000)
+  );
   const progressPct =
     activeItems.length > 0
       ? isProcessingBatch
         ? 100
-        : Math.min(100, Math.max(0, ((CYCLE_DURATION_SEC - remainingSec) / CYCLE_DURATION_SEC) * 100))
+        : Math.min(100, Math.max(0, (elapsedActiveMs / (cycleDurationSec * 1000)) * 100))
       : 0;
+
+  const effectiveFocusedId =
+    focusedSlotId && activeItems.some((i) => i.id === focusedSlotId)
+      ? focusedSlotId
+      : activeItems[0]?.id ?? null;
+  const focusedItem = activeItems.find((i) => i.id === effectiveFocusedId) ?? activeItems[0] ?? null;
+
+  const openedCount = activeItems.filter(
+    (item) => elapsedActiveMs >= (openAtMsById[item.id] ?? 0)
+  ).length;
 
   return (
     <aside
-      aria-label="Compact auto visit dock"
-      className={`fixed right-3 bottom-[72px] left-3 z-40 transition-all lg:right-5 lg:bottom-5 lg:left-auto ${
-        isMultiRunning ? 'lg:w-[560px]' : 'lg:w-[430px]'
+      aria-label="In-app visit browser dock"
+      className={`fixed z-40 transition-all ${
+        isExpanded
+          ? 'inset-2 sm:inset-5'
+          : `right-3 bottom-[72px] left-3 lg:right-5 lg:bottom-5 lg:left-auto ${
+              isMultiRunning ? 'lg:w-[680px]' : 'lg:w-[540px]'
+            }`
       }`}
     >
-      {/* Spark / confetti particle celebration layer (overflow-visible above dock) */}
+      {/* Spark / confetti particle celebration layer */}
       <AnimatePresence>
         {celebrationBurst && (
           <motion.div
             key={celebrationBurst.id}
             aria-hidden="true"
-            className="pointer-events-none absolute inset-0 z-20 overflow-visible"
+            className="pointer-events-none absolute inset-0 z-30 overflow-visible"
             initial={{ opacity: 1 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -585,16 +754,16 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       </AnimatePresence>
 
       <div
-        className={`neon-prism-panel overflow-hidden rounded-2xl border transition-colors duration-300 ${
+        className={`neon-prism-panel flex h-full flex-col overflow-hidden rounded-2xl border transition-colors duration-300 ${
           celebrationBurst
             ? 'border-[#00FF87]/85 shadow-[0_0_32px_-6px_rgba(0,255,135,0.5)]'
             : 'border-[#00F5FF]/45'
         }`}
       >
-        {/* Top thin cycle progress bar */}
-        <div className="h-1.5 w-full bg-[#050817]">
+        {/* Top cycle progress bar */}
+        <div className="h-1.5 w-full shrink-0 bg-[#050817]">
           <div
-            className={`h-full transition-[width] duration-700 ${
+            className={`h-full transition-[width] duration-300 ${
               celebrationBurst
                 ? 'bg-gradient-to-r from-[#00FF87] via-[#00F5FF] to-[#FFB800]'
                 : 'bg-gradient-to-r from-[#00F5FF] via-[#3B82F6] via-[#B84DFF] to-[#FF2E93]'
@@ -603,8 +772,8 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           />
         </div>
 
-        {/* Compact Control Header */}
-        <div className="flex items-center justify-between gap-2 px-3 py-2">
+        {/* Header Bar */}
+        <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <motion.span
               animate={
@@ -624,7 +793,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               {isMultiRunning ? (
                 <Layers className="h-3.5 w-3.5" />
               ) : (
-                <Sparkles className="h-3.5 w-3.5" />
+                <Globe className="h-3.5 w-3.5" />
               )}
             </motion.span>
 
@@ -632,8 +801,8 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               <div className="flex items-center gap-1.5 text-xs font-bold text-white">
                 <span className="truncate">
                   {isMultiRunning
-                    ? `Multi (5) · ${activeItems.length}/5 Concurrent`
-                    : 'Auto Visit'}
+                    ? `Multi (5) · ${openedCount}/${activeItems.length} Open`
+                    : 'In-App Browser Visit'}
                 </span>
                 {activeItems.length > 0 && (
                   <span className="font-mono-num rounded bg-[#00F5FF]/20 px-1.5 py-0.5 text-[10px] font-bold text-[#00F5FF]">
@@ -643,7 +812,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               </div>
               <p className="font-mono-num truncate text-[11px] text-slate-300">
                 {activeItems.length > 0
-                  ? `${activeItems[0].title}${activeItems.length > 1 ? ` +${activeItems.length - 1}` : ''} · Ready ${queueCooldownMetrics.readyCount} · Done ${completedCount}`
+                  ? `${focusedItem?.domain || focusedItem?.title || ''} · Ready ${queueCooldownMetrics.readyCount} · Done ${completedCount}`
                   : links.length === 0
                     ? 'No links in queue'
                     : `Cooldown ${queueCooldownMetrics.shortestCooldownSec}s · ${queueCooldownMetrics.coolingCount} waiting`}
@@ -701,21 +870,39 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
             <button
               type="button"
-              onClick={() => setShowPreview((s) => !s)}
-              aria-label={showPreview ? 'Minimize mini frames' : 'Show mini frames'}
+              onClick={() => {
+                setShowPreview(true);
+                setIsExpanded((e) => !e);
+              }}
+              aria-label={isExpanded ? 'Restore dock size' : 'Expand full in-app view'}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
             >
-              {showPreview ? (
-                <ChevronDown className="h-3.5 w-3.5" />
+              {isExpanded ? (
+                <Minimize2 className="h-3.5 w-3.5 text-[#00FF87]" />
               ) : (
-                <ChevronUp className="h-3.5 w-3.5" />
+                <Maximize2 className="h-3.5 w-3.5" />
               )}
             </button>
+
+            {!isExpanded && (
+              <button
+                type="button"
+                onClick={() => setShowPreview((s) => !s)}
+                aria-label={showPreview ? 'Minimize viewer' : 'Show viewer'}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
+              >
+                {showPreview ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronUp className="h-3.5 w-3.5" />
+                )}
+              </button>
+            )}
 
             <button
               type="button"
               onClick={onClose}
-              aria-label="Stop and close auto visit"
+              aria-label="Stop and close in-app visit"
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-rose-400/25 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20"
             >
               <X className="h-3.5 w-3.5" />
@@ -723,74 +910,141 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           </div>
         </div>
 
-        {/* Compact Bottom Mini Viewports (always mounted while active; visually minimized when collapsed) */}
+        {/* Full-Height In-App Browser Viewer (opened slots run staggered 4-7.5s apart inside real spacious viewports) */}
         {activeItems.length > 0 ? (
           <div
             className={
-              showPreview
-                ? 'border-t border-white/10 bg-slate-950/75 px-3 py-2'
+              showPreview || isExpanded
+                ? 'flex min-h-0 flex-1 flex-col border-t border-white/10 bg-slate-950/90'
                 : 'pointer-events-none h-0 overflow-hidden opacity-0'
             }
           >
-            <div
-              className={`grid gap-2 ${
-                isMultiRunning && activeItems.length > 1
-                  ? 'grid-cols-2 sm:grid-cols-5'
-                  : 'grid-cols-1'
-              }`}
-            >
+            {/* Tab Strip for Multi (5) Staggered In-App Tabs */}
+            <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 bg-[#050817]/95 px-2.5 py-1.5">
               {activeItems.map((item, idx) => {
-                const status = slotStates[item.id] ?? 'visiting';
+                const openAtMs = openAtMsById[item.id] ?? 0;
+                const isOpened = elapsedActiveMs >= openAtMs;
+                const waitSec = Math.max(1, Math.ceil((openAtMs - elapsedActiveMs) / 1000));
+                const status = slotStates[item.id] ?? (isOpened ? 'visiting' : 'queued');
+                const isFocused = item.id === effectiveFocusedId;
+
                 return (
-                  <div
+                  <button
                     key={item.id}
-                    className="overflow-hidden rounded-xl border border-white/10 bg-slate-900/90"
+                    type="button"
+                    onClick={() => {
+                      userSelectedTabInBatchRef.current = true;
+                      setFocusedSlotId(item.id);
+                    }}
+                    className={`flex max-w-[170px] shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors ${
+                      isFocused
+                        ? 'border-[#00F5FF]/60 bg-[#00F5FF]/15 font-bold text-white'
+                        : isOpened
+                          ? 'border-white/10 bg-white/5 text-slate-300 hover:bg-white/10'
+                          : 'border-white/5 bg-white/[0.02] text-slate-400'
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-1 border-b border-white/10 px-2 py-1 text-[10px]">
-                      <span className="truncate font-semibold text-slate-200">
-                        {isMultiRunning ? `${idx + 1}. ` : ''}
-                        {item.domain || item.title}
-                      </span>
-                      <div className="flex shrink-0 items-center gap-1">
-                        {status === 'processing' && (
-                          <span className="text-[9px] font-bold text-amber-300">...</span>
-                        )}
-                        {status === 'done' && (
-                          <span className="text-[9px] font-bold text-emerald-300">OK</span>
-                        )}
-                        {status === 'error' && (
-                          <span className="text-[9px] font-bold text-rose-300">ERR</span>
-                        )}
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          aria-label={`Open ${item.title} in new tab`}
-                          className="shrink-0 text-cyan-300 hover:text-cyan-200"
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      </div>
-                    </div>
-                    <iframe
-                      src={item.url}
-                      title={item.title}
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-                      referrerPolicy="no-referrer-when-downgrade"
-                      loading="eager"
-                      className={`w-full border-0 bg-white ${
-                        isMultiRunning && activeItems.length > 1 ? 'h-20 sm:h-24' : 'h-24'
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        status === 'done'
+                          ? 'bg-[#00FF87]'
+                          : status === 'processing'
+                            ? 'animate-pulse bg-[#FFB800]'
+                            : isOpened
+                              ? 'bg-[#00F5FF]'
+                              : 'bg-slate-500'
                       }`}
                     />
-                  </div>
+                    <span className="truncate">
+                      {activeItems.length > 1 ? `${idx + 1}. ` : ''}
+                      {item.domain || item.title}
+                    </span>
+                    {!isOpened && (
+                      <span className="font-mono-num shrink-0 text-[9px] text-amber-300">
+                        {waitSec}s
+                      </span>
+                    )}
+                    {status === 'done' && (
+                      <span className="shrink-0 text-[9px] font-bold text-[#00FF87]">OK</span>
+                    )}
+                  </button>
+                );
+              })}
+
+              {focusedItem && (
+                <a
+                  href={focusedItem.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${focusedItem.title} in browser tab`}
+                  className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-[#00F5FF]/35 bg-[#00F5FF]/10 px-2 py-1 text-[10px] font-semibold text-[#00F5FF] hover:bg-[#00F5FF]/20"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  <span className="hidden sm:inline">Open Tab</span>
+                </a>
+              )}
+            </div>
+
+            {/* Spacious Real In-App Viewport Stage (never tiny 80px frames; all opened tabs keep full visible dimensions) */}
+            <div
+              className={`relative w-full bg-white ${
+                isExpanded
+                  ? 'min-h-[320px] flex-1'
+                  : 'h-[260px] sm:h-[320px]'
+              }`}
+            >
+              {activeItems.map((item) => {
+                const openAtMs = openAtMsById[item.id] ?? 0;
+                const isOpened = elapsedActiveMs >= openAtMs;
+                const isFocused = item.id === effectiveFocusedId;
+
+                if (!isOpened) {
+                  if (!isFocused) return null;
+                  const waitSec = Math.max(1, Math.ceil((openAtMs - elapsedActiveMs) / 1000));
+                  return (
+                    <div
+                      key={item.id}
+                      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-[#070B20] px-4 text-center"
+                    >
+                      <Clock className="h-7 w-7 animate-pulse text-[#00F5FF]" />
+                      <p className="text-xs font-bold text-white">
+                        Opening {item.domain || item.title} in {waitSec}s...
+                      </p>
+                      <p className="max-w-xs text-[11px] text-slate-400">
+                        Staggered human-paced delay (4–7.5s) prevents burst traffic spikes.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <iframe
+                    key={item.id}
+                    src={item.url}
+                    title={item.title}
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+                    referrerPolicy="no-referrer"
+                    loading="eager"
+                    className={`absolute inset-0 h-full w-full border-0 bg-white ${
+                      isFocused ? 'z-20' : 'z-10'
+                    }`}
+                  />
                 );
               })}
             </div>
-            {isMultiRunning && (
-              <p className="mt-1.5 text-[10px] text-slate-400">
-                Sites blocking frame previews still credit verified dwell cycles; tap ↗ on any slot to open directly.
-              </p>
-            )}
+
+            {/* Subtle Safety Footer */}
+            <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/10 bg-[#050817] px-3 py-1.5 text-[10px] text-slate-400">
+              <span className="flex items-center gap-1 truncate">
+                <ShieldCheck className="h-3 w-3 shrink-0 text-[#00FF87]" />
+                <span className="truncate">
+                  Human-paced {cycleDurationSec}s cycle · Staggered 4–7.5s · No-Referrer
+                </span>
+              </span>
+              <span className="font-mono-num shrink-0 text-slate-300">
+                {isPaused ? 'Paused' : `${remainingSec}s left`}
+              </span>
+            </div>
           </div>
         ) : (
           <div className="flex items-center justify-between border-t border-white/10 bg-slate-950/70 px-3 py-2 text-[11px] text-slate-300">
