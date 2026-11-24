@@ -42,7 +42,12 @@ interface AdsterraScreenProps {
   mySubmittedLinks?: ManagedLink[];
   isMulti5Active: boolean;
   hasPendingMultiPayment: boolean;
-  onConnectApiKey: (payload: { apiKey: string; verifyWithAdsterra: boolean }) => Promise<void>;
+  onConnectApiKey: (payload: {
+    apiKey: string;
+    verifyWithAdsterra: boolean;
+    smartlinkUrl?: string;
+    smartlinkTitle?: string;
+  }) => Promise<void>;
   onSyncOfficialApi: () => Promise<void>;
   onFetchStats: (params: {
     preset: AdsterraDatePreset;
@@ -128,13 +133,14 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
   onOpenProModal,
 }) => {
   const [apiKeyInput, setApiKeyInput] = useState('');
+  const [connectSmartlinkUrlInput, setConnectSmartlinkUrlInput] = useState('');
+  const [connectSmartlinkTitleInput, setConnectSmartlinkTitleInput] = useState('');
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [syncingApi, setSyncingApi] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [retryingBackend, setRetryingBackend] = useState(false);
-  const [attachingPlacementId, setAttachingPlacementId] = useState<string | null>(null);
-  const [attachUrlInput, setAttachUrlInput] = useState('');
-  const [savingAttachedUrl, setSavingAttachedUrl] = useState(false);
+  const [placementUrlDrafts, setPlacementUrlDrafts] = useState<Record<string, string>>({});
+  const [savingPlacementId, setSavingPlacementId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -272,6 +278,16 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       pushUrl(`saved_${l.id}`, l.title, l.url, `${l.domain} · ${l.category}`, l.id);
     }
 
+    for (const link of mySubmittedLinks) {
+      if (link.type !== 'smartlink' || link.status === 'rejected') continue;
+      pushUrl(
+        `community_${link.id}`,
+        link.title,
+        link.url,
+        `${link.domain} · Published Live`
+      );
+    }
+
     if (integration?.smartlinkUrl) {
       pushUrl(
         'primary_smartlink',
@@ -282,7 +298,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
     }
 
     return items;
-  }, [backendStatus.placementsPreview, domainTitleById, integration, personalSmartlinks]);
+  }, [backendStatus.placementsPreview, domainTitleById, integration, mySubmittedLinks, personalSmartlinks]);
 
   useEffect(() => {
     const validIds = new Set(syncedSmartlinkItems.map((l) => l.id));
@@ -352,12 +368,16 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       await onConnectApiKey({
         apiKey: apiKeyInput,
         verifyWithAdsterra: true,
+        smartlinkUrl: connectSmartlinkUrlInput.trim() || undefined,
+        smartlinkTitle: connectSmartlinkTitleInput.trim() || undefined,
       });
       setApiKeyInput('');
+      setConnectSmartlinkUrlInput('');
+      setConnectSmartlinkTitleInput('');
       setFeedback({
         type: 'success',
         message:
-          'Adsterra API connected & Smartlinks with direct URLs auto-shared to Community Exchange.',
+          'Adsterra API connected & Smartlinks published permanently inside the app (stays active even if API disconnects).',
       });
     } catch (err) {
       setFeedback({
@@ -379,7 +399,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       setFeedback({
         type: 'success',
         message:
-          'Live Adsterra stats, domains, placements & Community Smartlinks synced automatically.',
+          'Live Adsterra stats, domains, placements & published Smartlinks synced and saved.',
       });
     } catch (err) {
       setFeedback({
@@ -400,7 +420,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
       setApiKeyInput('');
       setFeedback({
         type: 'success',
-        message: 'Adsterra API disconnected.',
+        message:
+          'Adsterra API disconnected — your published Smartlinks stay saved and live in the app.',
       });
     } catch (err) {
       setFeedback({
@@ -423,21 +444,25 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
     }
   };
 
-  const handleBindPlacementUrl = async (placementTitle: string) => {
-    if (savingAttachedUrl || !attachUrlInput.trim()) return;
+  const handleBindPlacementUrl = async (placementId: string, placementTitle: string) => {
+    const rawUrl = (placementUrlDrafts[placementId] || '').trim();
+    if (savingPlacementId || !rawUrl) return;
     setFeedback(null);
-    setSavingAttachedUrl(true);
+    setSavingPlacementId(placementId);
     try {
       await onCreatePersonalSmartlink({
         title: placementTitle || 'Adsterra Smartlink',
-        rawUrl: attachUrlInput,
+        rawUrl,
         category: 'Other',
       });
-      setAttachingPlacementId(null);
-      setAttachUrlInput('');
+      setPlacementUrlDrafts((prev) => {
+        const next = { ...prev };
+        delete next[placementId];
+        return next;
+      });
       setFeedback({
         type: 'success',
-        message: `Smartlink URL saved & auto-shared with everyone in Community for "${placementTitle}".`,
+        message: `Smartlink "${placementTitle}" saved & published live for everyone (stays live even if API disconnects).`,
       });
     } catch (err) {
       setFeedback({
@@ -445,7 +470,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
         message: err instanceof Error ? err.message : 'Invalid Smartlink URL.',
       });
     } finally {
-      setSavingAttachedUrl(false);
+      setSavingPlacementId(null);
     }
   };
 
@@ -1195,28 +1220,49 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
           </p>
         )}
 
-        <form onSubmit={handleSaveApiKey} className="flex flex-col gap-2.5 sm:flex-row">
-          <input
-            type="password"
-            autoComplete="off"
-            maxLength={200}
-            value={apiKeyInput}
-            onChange={(e) => setApiKeyInput(e.target.value)}
-            placeholder={
-              hasBackendKey
-                ? `Connected (${keyHint}) — paste new token to update`
-                : 'Paste your Adsterra API Token...'
-            }
-            className="font-mono-num min-h-[44px] flex-1 rounded-xl border border-[#00F5FF]/25 bg-[#050817]/90 px-3.5 py-2 text-xs text-white placeholder:text-slate-400 focus:border-[#00FF87] focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={savingApiKey || !apiKeyInput.trim()}
-            className="neon-btn-emerald flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-5 py-2 text-xs font-extrabold disabled:opacity-50"
-          >
-            <ShieldCheck className="h-4 w-4" />
-            <span>{savingApiKey ? 'Connecting...' : 'Verify & Connect'}</span>
-          </button>
+        <form onSubmit={handleSaveApiKey} className="space-y-2.5">
+          <div className="flex flex-col gap-2.5 sm:flex-row">
+            <input
+              type="password"
+              autoComplete="off"
+              maxLength={200}
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              placeholder={
+                hasBackendKey
+                  ? `Connected (${keyHint}) — paste new token to update`
+                  : 'Paste your Adsterra API Token...'
+              }
+              className="font-mono-num min-h-[44px] flex-1 rounded-xl border border-[#00F5FF]/25 bg-[#050817]/90 px-3.5 py-2 text-xs text-white placeholder:text-slate-400 focus:border-[#00FF87] focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={savingApiKey || !apiKeyInput.trim()}
+              className="neon-btn-emerald flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-5 py-2 text-xs font-extrabold disabled:opacity-50"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              <span>{savingApiKey ? 'Connecting...' : 'Verify & Connect'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <input
+              type="text"
+              maxLength={80}
+              value={connectSmartlinkTitleInput}
+              onChange={(e) => setConnectSmartlinkTitleInput(e.target.value)}
+              placeholder="Smartlink Title (Optional)"
+              className="min-h-[40px] rounded-xl border border-white/15 bg-[#050817]/80 px-3 py-1.5 text-xs text-white placeholder:text-slate-400 focus:border-[#00F5FF] focus:outline-none"
+            />
+            <input
+              type="url"
+              maxLength={500}
+              value={connectSmartlinkUrlInput}
+              onChange={(e) => setConnectSmartlinkUrlInput(e.target.value)}
+              placeholder="Direct / Smartlink URL (Optional — auto-publishes & stays live)"
+              className="min-h-[40px] rounded-xl border border-white/15 bg-[#050817]/80 px-3 py-1.5 text-xs text-white placeholder:text-slate-400 focus:border-[#00F5FF] focus:outline-none sm:col-span-2"
+            />
+          </div>
         </form>
 
         {backendStatus.domainsPreview.length > 0 && (
@@ -1277,16 +1323,16 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
         </div>
 
         <div className="rounded-2xl border border-[#00FF87]/30 bg-[#00FF87]/8 px-4 py-2.5 text-xs text-slate-200">
-          <span className="font-bold text-[#00FF87]">Auto-Share Mutual Exchange Active:</span>{' '}
-          Whenever you connect your Adsterra API or link a Smartlink URL, your Smartlinks automatically publish live to all other members&apos; Auto-Visit queues (while staying hidden from your own queue so you never self-click).
+          <span className="font-bold text-[#00FF87]">Auto-Publish &amp; Persistent Mode:</span>{' '}
+          Smartlinks synced from your Adsterra API or linked below are automatically published live inside the app for all other members—and remain saved and live even if you disconnect the API.
         </div>
 
         {/* Ready Smartlinks List */}
         {syncedSmartlinkItems.length === 0 && unlinkedPlacements.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-[#070B20]/65 p-6 text-center text-xs text-slate-400">
             {hasBackendKey
-              ? 'No placements synced yet. Tap "Sync Now" above after creating a Smartlink in Adsterra.'
-              : 'Connect your Adsterra API Token above to load your Smartlinks and full stats automatically.'}
+              ? 'No Smartlink URLs found yet. Paste your Adsterra Smartlink URL above or tap "Sync Now".'
+              : 'Connect your Adsterra API Token (with optional Smartlink URL) above to load & auto-publish your Smartlinks.'}
           </div>
         ) : (
           <div className="space-y-2.5">
@@ -1384,7 +1430,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             {/* Placements returned by Adsterra placements.json that omit a direct URL */}
             {unlinkedPlacements.map((p) => {
               const domainName = domainTitleById.get(p.domainId);
-              const isAttaching = attachingPlacementId === p.id;
+              const draftUrl = placementUrlDrafts[p.id] ?? '';
+              const isSavingThis = savingPlacementId === p.id;
               return (
                 <div
                   key={p.id}
@@ -1400,39 +1447,31 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
                         {p.status ? ` · ${p.status}` : ''}
                       </p>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAttachingPlacementId(isAttaching ? null : p.id);
-                        setAttachUrlInput('');
-                      }}
-                      className="flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[#00F5FF]/40 bg-[#00F5FF]/15 px-3 py-1 text-xs font-semibold text-[#00F5FF] hover:bg-[#00F5FF]/25"
-                    >
-                      <Link2 className="h-3.5 w-3.5" />
-                      <span>{isAttaching ? 'Close' : 'Link URL'}</span>
-                    </button>
+                    <span className="rounded-lg border border-[#FFB800]/35 bg-[#FFB800]/10 px-2.5 py-1 text-[11px] font-semibold text-[#FFD166]">
+                      URL needed from Adsterra Dashboard
+                    </span>
                   </div>
 
-                  {isAttaching && (
-                    <div className="flex flex-col gap-2 border-t border-white/10 pt-2.5 sm:flex-row">
-                      <input
-                        type="url"
-                        value={attachUrlInput}
-                        onChange={(e) => setAttachUrlInput(e.target.value)}
-                        placeholder={`Paste Adsterra URL for "${p.title}"...`}
-                        className="min-h-[40px] flex-1 rounded-xl border border-white/15 bg-[#050817]/85 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00F5FF] focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        disabled={savingAttachedUrl || !attachUrlInput.trim()}
-                        onClick={() => void handleBindPlacementUrl(p.title)}
-                        className="neon-btn-emerald min-h-[40px] rounded-xl px-4 py-1.5 text-xs font-bold disabled:opacity-50"
-                      >
-                        {savingAttachedUrl ? 'Saving...' : 'Save URL'}
-                      </button>
-                    </div>
-                  )}
+                  <div className="flex flex-col gap-2 border-t border-white/10 pt-2.5 sm:flex-row">
+                    <input
+                      type="url"
+                      value={draftUrl}
+                      onChange={(e) =>
+                        setPlacementUrlDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))
+                      }
+                      placeholder={`Paste Direct / Smartlink URL for "${p.title}" to auto-publish...`}
+                      className="min-h-[40px] flex-1 rounded-xl border border-white/15 bg-[#050817]/85 px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:border-[#00F5FF] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={isSavingThis || !draftUrl.trim()}
+                      onClick={() => void handleBindPlacementUrl(p.id, p.title)}
+                      className="neon-btn-emerald flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl px-4 py-1.5 text-xs font-bold disabled:opacity-50"
+                    >
+                      <Link2 className="h-3.5 w-3.5" />
+                      <span>{isSavingThis ? 'Publishing...' : 'Save & Auto-Publish'}</span>
+                    </button>
+                  </div>
                 </div>
               );
             })}

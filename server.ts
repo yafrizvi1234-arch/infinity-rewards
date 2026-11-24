@@ -730,6 +730,32 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
     placementItems = [];
   }
 
+  if (placementItems.length === 0 && domainItems.length > 0) {
+    for (const domainItem of domainItems.slice(0, 5)) {
+      const domainId = String(domainItem.id ?? '').trim();
+      if (!domainId) continue;
+      try {
+        const domPlacementsRes = await fetch(
+          `${ADSTERRA_API_BASE}/domain/${encodeURIComponent(domainId)}/placements.json`,
+          {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(6000),
+          }
+        );
+        if (domPlacementsRes.ok) {
+          const domPlacementsJson = await domPlacementsRes.json();
+          const items = extractApiItemsArray(domPlacementsJson);
+          if (items.length > 0) {
+            placementItems.push(...items);
+          }
+        }
+      } catch {
+        // Ignore single-domain fallback fetch errors
+      }
+    }
+  }
+
   const domainsPreview = domainItems.slice(0, 50).map((d) => ({
     id: String(d.id ?? ''),
     title: String(d.title ?? 'Domain').slice(0, 80),
@@ -755,14 +781,31 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
       p.adUrl,
       p.redirect_url,
       p.redirectUrl,
+      p.alias,
     ].find(
       (v) => typeof v === 'string' && /^(https?:)?\/\/[^\s"'<>]+$/i.test(v.trim())
     ) as string | undefined;
-    const candidateUrl = rawCandidate
+
+    let candidateUrl = rawCandidate
       ? rawCandidate.trim().startsWith('//')
         ? `https:${rawCandidate.trim()}`
         : rawCandidate.trim()
       : undefined;
+
+    if (!candidateUrl) {
+      const rawHtml = [p.code, p.snippet, p.html].find((v) => typeof v === 'string') as
+        | string
+        | undefined;
+      if (rawHtml) {
+        const hrefMatch = rawHtml.match(/href\s*=\s*["']((?:https?:)?\/\/[^"'\s<>]+)["']/i);
+        if (hrefMatch?.[1]) {
+          candidateUrl = hrefMatch[1].startsWith('//')
+            ? `https:${hrefMatch[1]}`
+            : hrefMatch[1];
+        }
+      }
+    }
+
     return {
       id: String(p.id ?? ''),
       domainId: String(p.domain_id ?? ''),

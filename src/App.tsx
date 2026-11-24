@@ -277,6 +277,7 @@ export default function App() {
   const [adsterraBackendStatus, setAdsterraBackendStatus] =
     useState<AdsterraBackendStatus>(DEFAULT_BACKEND_STATUS);
   const [personalSmartlinks, setPersonalSmartlinks] = useState<UserPersonalSmartlink[]>([]);
+  const [personalSmartlinksHydrated, setPersonalSmartlinksHydrated] = useState<boolean>(false);
 
   const [previousScreen, setPreviousScreen] = useState<MainScreen>('home');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -302,6 +303,7 @@ export default function App() {
   const lastIdentityKeyRef = useRef<string | null>(null);
   const visitStatsQueueRef = useRef<Promise<void>>(Promise.resolve());
   const attemptedAutoPublishUrlsRef = useRef<Set<string>>(new Set());
+  const attemptedPersonalSaveUrlsRef = useRef<Set<string>>(new Set());
   const autoPublishInFlightRef = useRef<boolean>(false);
   const autoEnabledMultiRef = useRef(false);
   const latestWorkspaceRef = useRef({
@@ -619,7 +621,10 @@ export default function App() {
     const unsubPersonalSmartlinks = subscribeMyPersonalSmartlinks(
       authUser.uid,
       (links) => {
-        if (!cancelled) setPersonalSmartlinks(links);
+        if (!cancelled) {
+          setPersonalSmartlinks(links);
+          setPersonalSmartlinksHydrated(true);
+        }
       },
       handleListenerError
     );
@@ -648,8 +653,10 @@ export default function App() {
       setAdsterraIntegration(null);
       setAdsterraBackendStatus(DEFAULT_BACKEND_STATUS);
       setPersonalSmartlinks([]);
+      setPersonalSmartlinksHydrated(false);
       setMyLinksHydrated(false);
       attemptedAutoPublishUrlsRef.current.clear();
+      attemptedPersonalSaveUrlsRef.current.clear();
     };
   }, [authUser, isEmailVerified, clearAdminSessionState, retryNonce]);
 
@@ -1163,7 +1170,7 @@ export default function App() {
   const autoPublishSmartlinksToCommunity = useCallback(
     async (
       candidates: Array<{ title: string; url: string; category?: string }>,
-      options?: { ignoreSuppressed?: boolean }
+      options?: { ignoreSuppressed?: boolean; skipPersonalPersist?: boolean }
     ): Promise<number> => {
       if (!authUser || !isEmailVerified || candidates.length === 0) return 0;
       if (autoPublishInFlightRef.current) return 0;
@@ -1175,14 +1182,21 @@ export default function App() {
           ? new Set<string>()
           : readSuppressedAutoPublishUrls(authUser.uid);
 
-        const knownUrls = new Set<string>();
+        const knownCommunityUrls = new Set<string>();
         for (const item of mySubmittedLinks) {
-          if (item.normalizedUrl) knownUrls.add(item.normalizedUrl);
-          if (item.url) knownUrls.add(item.url.trim());
+          if (item.normalizedUrl) knownCommunityUrls.add(item.normalizedUrl);
+          if (item.url) knownCommunityUrls.add(item.url.trim());
         }
         for (const item of approvedLinks) {
-          if (item.normalizedUrl) knownUrls.add(item.normalizedUrl);
-          if (item.url) knownUrls.add(item.url.trim());
+          if (item.normalizedUrl) knownCommunityUrls.add(item.normalizedUrl);
+          if (item.url) knownCommunityUrls.add(item.url.trim());
+        }
+
+        const knownPersonalUrls = new Set<string>();
+        for (const item of personalSmartlinks) {
+          const check = validateAndNormalizeUrl(item.url);
+          if (check.normalizedUrl) knownPersonalUrls.add(check.normalizedUrl);
+          if (item.url) knownPersonalUrls.add(item.url.trim());
         }
 
         const dedupedBatch: Array<{
@@ -1197,15 +1211,7 @@ export default function App() {
           const check = validateAndNormalizeUrl(candidate.url);
           if (!check.valid || !check.url || !check.normalizedUrl) continue;
           const normalized = check.normalizedUrl;
-          if (
-            batchSeen.has(normalized) ||
-            knownUrls.has(normalized) ||
-            knownUrls.has(check.url) ||
-            suppressed.has(normalized) ||
-            attemptedAutoPublishUrlsRef.current.has(normalized)
-          ) {
-            continue;
-          }
+          if (batchSeen.has(normalized)) continue;
           batchSeen.add(normalized);
           dedupedBatch.push({
             title: candidate.title,
@@ -1217,13 +1223,44 @@ export default function App() {
         }
 
         for (const entry of dedupedBatch) {
-          attemptedAutoPublishUrlsRef.current.add(entry.normalized);
           const trimmedTitle = entry.title.trim();
           const safeTitle =
             trimmedTitle.length >= 3
               ? trimmedTitle.slice(0, 80)
               : `${trimmedTitle || 'Adsterra'} Smartlink`.slice(0, 80);
 
+          // 1. Persist in userSmartlinks so Smartlinks remain visible in AdsterraScreen even after API disconnect
+          if (
+            !options?.skipPersonalPersist &&
+            !knownPersonalUrls.has(entry.normalized) &&
+            !knownPersonalUrls.has(entry.url) &&
+            !attemptedPersonalSaveUrlsRef.current.has(entry.normalized)
+          ) {
+            attemptedPersonalSaveUrlsRef.current.add(entry.normalized);
+            try {
+              await createMyPersonalSmartlink({
+                uid: authUser.uid,
+                title: safeTitle,
+                rawUrl: entry.url,
+                category: entry.category,
+              });
+              knownPersonalUrls.add(entry.normalized);
+            } catch {
+              // Ignore personal persistence error and continue publishing to community
+            }
+          }
+
+          // 2. Auto-publish live (approved) in Community links so everyone receives it immediately
+          if (
+            knownCommunityUrls.has(entry.normalized) ||
+            knownCommunityUrls.has(entry.url) ||
+            suppressed.has(entry.normalized) ||
+            attemptedAutoPublishUrlsRef.current.has(entry.normalized)
+          ) {
+            continue;
+          }
+
+          attemptedAutoPublishUrlsRef.current.add(entry.normalized);
           try {
             await submitLinkSecure({
               uid: authUser.uid,
@@ -1238,7 +1275,7 @@ export default function App() {
               category: entry.category,
             });
             publishedCount += 1;
-            knownUrls.add(entry.normalized);
+            knownCommunityUrls.add(entry.normalized);
           } catch {
             // Skip duplicate or validation-rejected URLs silently
           }
@@ -1254,6 +1291,7 @@ export default function App() {
       authUser,
       isEmailVerified,
       mySubmittedLinks,
+      personalSmartlinks,
       state.profile.avatar,
       state.profile.displayName,
       state.profile.username,
@@ -1296,7 +1334,15 @@ export default function App() {
 
   // Auto-publish synced Adsterra Smartlinks to Community Exchange once workspace & links hydrate
   useEffect(() => {
-    if (!authUser || !isEmailVerified || !workspaceReady || !myLinksHydrated) return;
+    if (
+      !authUser ||
+      !isEmailVerified ||
+      !workspaceReady ||
+      !myLinksHydrated ||
+      !personalSmartlinksHydrated
+    ) {
+      return;
+    }
     const candidates = collectSmartlinkCandidates(
       adsterraBackendStatus,
       adsterraIntegration,
@@ -1320,6 +1366,7 @@ export default function App() {
     isEmailVerified,
     myLinksHydrated,
     personalSmartlinks,
+    personalSmartlinksHydrated,
     workspaceReady,
   ]);
 
@@ -1327,28 +1374,58 @@ export default function App() {
   const handleConnectAdsterraApiKey = async (payload: {
     apiKey: string;
     verifyWithAdsterra: boolean;
+    smartlinkUrl?: string;
+    smartlinkTitle?: string;
   }) => {
     if (!authUser) return;
-    const nextBackendStatus = await connectAdsterraApiKeySecure(payload);
+    const nextBackendStatus = await connectAdsterraApiKeySecure({
+      apiKey: payload.apiKey,
+      verifyWithAdsterra: payload.verifyWithAdsterra,
+    });
     setAdsterraBackendStatus(nextBackendStatus);
+
+    const optionalUrl = payload.smartlinkUrl?.trim() || '';
+    const resolvedPrimaryUrl = optionalUrl || adsterraIntegration?.smartlinkUrl || '';
+    const resolvedPrimaryTitle =
+      payload.smartlinkTitle?.trim() ||
+      adsterraIntegration?.smartlinkTitle ||
+      (resolvedPrimaryUrl ? 'Adsterra Smartlink' : '');
+
     await saveMyAdsterraIntegration({
       uid: authUser.uid,
       publisherId: adsterraIntegration?.publisherId ?? '',
       publisherLabel: adsterraIntegration?.publisherLabel ?? '',
-      smartlinkTitle: adsterraIntegration?.smartlinkTitle ?? '',
-      smartlinkUrl: adsterraIntegration?.smartlinkUrl ?? '',
+      smartlinkTitle: resolvedPrimaryTitle,
+      smartlinkUrl: resolvedPrimaryUrl,
       connectionMode: 'official_api_key',
       backendStatus: nextBackendStatus,
     });
+
     const candidates = collectSmartlinkCandidates(
       nextBackendStatus,
       adsterraIntegration,
       personalSmartlinks
     );
-    const sharedCount = await autoPublishSmartlinksToCommunity(candidates);
+    if (optionalUrl) {
+      const urlCheck = validateAndNormalizeUrl(optionalUrl);
+      if (urlCheck.normalizedUrl) {
+        updateSuppressedAutoPublishUrl(authUser.uid, urlCheck.normalizedUrl, 'remove');
+        attemptedAutoPublishUrlsRef.current.delete(urlCheck.normalizedUrl);
+        attemptedPersonalSaveUrlsRef.current.delete(urlCheck.normalizedUrl);
+      }
+      candidates.unshift({
+        title: resolvedPrimaryTitle || 'Adsterra Smartlink',
+        url: optionalUrl,
+        category: 'Other',
+      });
+    }
+
+    const sharedCount = await autoPublishSmartlinksToCommunity(candidates, {
+      ignoreSuppressed: Boolean(optionalUrl),
+    });
     setToastMessage(
       sharedCount > 0
-        ? `Adsterra API connected & ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} auto-shared with everyone!`
+        ? `Adsterra API connected & ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} published live!`
         : nextBackendStatus.apiVerified
           ? 'Adsterra API Key verified and encrypted on backend'
           : 'Adsterra API Key stored in encrypted backend vault'
@@ -1378,7 +1455,7 @@ export default function App() {
     const sharedCount = await autoPublishSmartlinksToCommunity(candidates);
     setToastMessage(
       sharedCount > 0
-        ? `Synced Adsterra API & auto-shared ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} with everyone!`
+        ? `Synced Adsterra API & published ${sharedCount} Smartlink${sharedCount === 1 ? '' : 's'} live!`
         : 'Synced domains, placements & full Adsterra stats'
     );
   };
@@ -1403,7 +1480,7 @@ export default function App() {
     if (!authUser) return;
     const nextBackendStatus = await disconnectMyAdsterraIntegration(authUser.uid);
     setAdsterraBackendStatus(nextBackendStatus);
-    setToastMessage('Adsterra account disconnected & encrypted API key purged');
+    setToastMessage('Adsterra API disconnected — your published Smartlinks stay live in the app!');
   };
 
   const handleCreatePersonalSmartlink = async (payload: {
@@ -1431,12 +1508,12 @@ export default function App() {
           category: payload.category || 'Other',
         },
       ],
-      { ignoreSuppressed: true }
+      { ignoreSuppressed: true, skipPersonalPersist: true }
     );
     setToastMessage(
       sharedCount > 0
-        ? 'Smartlink saved & auto-shared with everyone in Community!'
-        : 'Personal Smartlink added to your private workspace'
+        ? 'Smartlink saved & published live in the app!'
+        : 'Personal Smartlink saved to your account'
     );
   };
 
