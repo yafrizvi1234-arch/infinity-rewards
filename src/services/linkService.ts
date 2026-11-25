@@ -30,7 +30,59 @@ import {
 import { computeUrlKey, validateAndNormalizeUrl } from '../utils/urlValidator';
 
 export const ADMIN_EMAIL = 'yafrizvi1234@gmail.com';
-export const DEFAULT_SPAM_COOLDOWN_SEC = 60;
+export const MIN_COOLDOWN_SEC = 12 * 3600; // 43,200s (12 hours)
+export const MAX_COOLDOWN_SEC = 24 * 3600; // 86,400s (24 hours)
+export const DEFAULT_SPAM_COOLDOWN_SEC = 18 * 3600; // 64,800s (18 hours)
+
+export function getRandomCooldownSec(): number {
+  return (
+    Math.floor(Math.random() * (MAX_COOLDOWN_SEC - MIN_COOLDOWN_SEC + 1)) +
+    MIN_COOLDOWN_SEC
+  );
+}
+
+export function clampSafeCooldownSec(rawSec?: number | null): number {
+  if (
+    typeof rawSec === 'number' &&
+    Number.isFinite(rawSec) &&
+    rawSec >= MIN_COOLDOWN_SEC &&
+    rawSec <= MAX_COOLDOWN_SEC
+  ) {
+    return Math.floor(rawSec);
+  }
+  return getRandomCooldownSec();
+}
+
+export function formatCooldownDuration(totalSec: number): string {
+  const sec = Math.max(0, Math.ceil(totalSec));
+  if (sec >= 3600) {
+    const hrs = Math.floor(sec / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+  }
+  if (sec >= 60) {
+    const mins = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    return remSec > 0 ? `${mins}m ${remSec}s` : `${mins}m`;
+  }
+  return `${sec}s`;
+}
+
+export function sanitizeTargetGeos(rawGeos?: unknown): string[] {
+  const fallback = ['US', 'UK', 'UAE', 'AU'];
+  if (!Array.isArray(rawGeos)) return fallback;
+  const cleaned: string[] = [];
+  const seen = new Set<string>();
+  for (const item of rawGeos) {
+    if (typeof item !== 'string') continue;
+    const norm = item.trim().toUpperCase().slice(0, 10);
+    if (norm.length < 2 || seen.has(norm)) continue;
+    seen.add(norm);
+    cleaned.push(norm);
+    if (cleaned.length >= 8) break;
+  }
+  return cleaned.length > 0 ? cleaned : fallback;
+}
 
 export function isAdminEmail(
   email: string | null | undefined,
@@ -87,6 +139,9 @@ function mapManagedLink(id: string, data: Record<string, unknown>): ManagedLink 
     category: String(data.category ?? 'Other'),
     status,
     cooldownSec: Number(data.cooldownSec ?? DEFAULT_SPAM_COOLDOWN_SEC),
+    targetGeos: Array.isArray(data.targetGeos)
+      ? data.targetGeos.slice(0, 8).map((g) => String(g).toUpperCase())
+      : undefined,
     reportCount: Number(data.reportCount ?? 0),
     moderationNote: data.moderationNote ? String(data.moderationNote) : undefined,
     moderatedBy: data.moderatedBy ? String(data.moderatedBy) : undefined,
@@ -144,6 +199,7 @@ export async function submitLinkSecure(params: {
   rawUrl: string;
   category: string;
   cooldownSec?: number;
+  targetGeos?: string[];
 }): Promise<string> {
   const validation = validateAndNormalizeUrl(params.rawUrl);
   if (!validation.valid || !validation.url || !validation.normalizedUrl || !validation.domain) {
@@ -161,6 +217,7 @@ export async function submitLinkSecure(params: {
   }
 
   const cleanCategory = params.category.trim().slice(0, 40) || 'Other';
+  const safeTargetGeos = sanitizeTargetGeos(params.targetGeos);
   const urlKey = await computeUrlKey(validation.normalizedUrl);
 
   const dup = await checkDuplicateUrlKey(urlKey);
@@ -169,7 +226,7 @@ export async function submitLinkSecure(params: {
   }
 
   const linkRef = doc(collection(db, 'links'));
-  const cooldown = Math.min(300, Math.max(30, Math.floor(params.cooldownSec ?? DEFAULT_SPAM_COOLDOWN_SEC)));
+  const cooldown = clampSafeCooldownSec(params.cooldownSec);
 
   const batch = writeBatch(db);
   batch.set(doc(db, 'linkRegistry', urlKey), {
@@ -196,6 +253,7 @@ export async function submitLinkSecure(params: {
     category: cleanCategory,
     status: params.type === 'smartlink' ? 'approved' : 'pending',
     cooldownSec: cooldown,
+    targetGeos: safeTargetGeos,
     reportCount: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -227,6 +285,7 @@ const ALLOWED_LINK_KEYS = new Set([
   'category',
   'status',
   'cooldownSec',
+  'targetGeos',
   'reportCount',
   'moderationNote',
   'moderatedBy',
@@ -253,7 +312,19 @@ function isRawLinkSchemaCompliant(linkId: string, raw: Record<string, unknown>):
   if (typeof raw.isHttps !== 'boolean') return false;
   if (typeof raw.category !== 'string' || raw.category.length < 2 || raw.category.length > 40) return false;
   if (raw.status !== 'pending' && raw.status !== 'approved' && raw.status !== 'rejected') return false;
-  if (typeof raw.cooldownSec !== 'number' || !Number.isInteger(raw.cooldownSec) || raw.cooldownSec < 30 || raw.cooldownSec > 300) return false;
+  if (typeof raw.cooldownSec !== 'number' || !Number.isInteger(raw.cooldownSec) || raw.cooldownSec < 30 || raw.cooldownSec > MAX_COOLDOWN_SEC) return false;
+  if ('targetGeos' in raw) {
+    if (
+      !Array.isArray(raw.targetGeos) ||
+      raw.targetGeos.length < 1 ||
+      raw.targetGeos.length > 8 ||
+      typeof raw.targetGeos[0] !== 'string' ||
+      raw.targetGeos[0].length < 2 ||
+      raw.targetGeos[0].length > 10
+    ) {
+      return false;
+    }
+  }
   if (typeof raw.reportCount !== 'number' || !Number.isInteger(raw.reportCount) || raw.reportCount < 0 || raw.reportCount > 10000) return false;
   if ('moderationNote' in raw && (typeof raw.moderationNote !== 'string' || raw.moderationNote.length > 240)) return false;
   if ('moderatedBy' in raw && (typeof raw.moderatedBy !== 'string' || raw.moderatedBy.length > 128)) return false;
@@ -271,6 +342,7 @@ export async function updateOwnLinkSecure(params: {
   description: string;
   rawUrl: string;
   category: string;
+  targetGeos?: string[];
 }): Promise<void> {
   if (params.existingLink.ownerId !== params.uid) {
     throw new Error('You can only edit links you submitted.');
@@ -329,8 +401,12 @@ export async function updateOwnLinkSecure(params: {
     });
   }
 
+  const safeTargetGeos = sanitizeTargetGeos(params.targetGeos ?? params.existingLink.targetGeos);
   const raw = linkSnap.data();
   if (isRawLinkSchemaCompliant(params.existingLink.id, raw)) {
+    const safeCooldown = clampSafeCooldownSec(
+      typeof raw.cooldownSec === 'number' ? raw.cooldownSec : undefined
+    );
     batch.update(linkRef, {
       type: params.type,
       title: cleanTitle,
@@ -341,6 +417,8 @@ export async function updateOwnLinkSecure(params: {
       domain: validation.domain.slice(0, 120),
       isHttps: Boolean(validation.isHttps),
       category: safeCategory,
+      cooldownSec: safeCooldown,
+      targetGeos: safeTargetGeos,
       status: params.type === 'smartlink' ? 'approved' : 'pending',
       updatedAt: serverTimestamp(),
     });
@@ -350,10 +428,11 @@ export async function updateOwnLinkSecure(params: {
     const rawUsername = String(raw.ownerUsername ?? params.existingLink.ownerUsername ?? '@member').trim().slice(0, 32);
     const safeOwnerUsername = rawUsername.length >= 2 ? rawUsername : '@member';
     const safeOwnerAvatar = String(raw.ownerAvatar ?? params.existingLink.ownerAvatar ?? USER_AVATAR).slice(0, 140000);
-    const safeCooldown =
+    const safeCooldown = clampSafeCooldownSec(
       typeof raw.cooldownSec === 'number' && Number.isInteger(raw.cooldownSec)
-        ? Math.min(300, Math.max(30, raw.cooldownSec))
-        : DEFAULT_SPAM_COOLDOWN_SEC;
+        ? raw.cooldownSec
+        : undefined
+    );
     const safeReportCount =
       typeof raw.reportCount === 'number' && Number.isInteger(raw.reportCount) && raw.reportCount >= 0
         ? Math.min(10000, raw.reportCount)
@@ -376,6 +455,7 @@ export async function updateOwnLinkSecure(params: {
       category: safeCategory,
       status: params.type === 'smartlink' ? 'approved' : 'pending',
       cooldownSec: safeCooldown,
+      targetGeos: safeTargetGeos,
       reportCount: safeReportCount,
       createdAt: raw.createdAt instanceof Timestamp ? raw.createdAt : serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -595,10 +675,11 @@ export async function moderateLinkSecure(params: {
     const rawUsername = String(raw.ownerUsername ?? params.link.ownerUsername ?? '@member').trim().slice(0, 32);
     const safeOwnerUsername = rawUsername.length >= 2 ? rawUsername : '@member';
     const safeOwnerAvatar = String(raw.ownerAvatar ?? params.link.ownerAvatar ?? USER_AVATAR).slice(0, 140000);
-    const safeCooldown =
+    const safeCooldown = clampSafeCooldownSec(
       typeof raw.cooldownSec === 'number' && Number.isInteger(raw.cooldownSec)
-        ? Math.min(300, Math.max(30, raw.cooldownSec))
-        : DEFAULT_SPAM_COOLDOWN_SEC;
+        ? raw.cooldownSec
+        : undefined
+    );
     const safeReportCount =
       typeof raw.reportCount === 'number' && Number.isInteger(raw.reportCount) && raw.reportCount >= 0
         ? Math.min(10000, raw.reportCount)

@@ -429,6 +429,17 @@ function aggregateStatTotals(rows: AdsterraMetricTotals[]): AdsterraMetricTotals
   };
 }
 
+function normalizeAdsterraGeoCode(raw?: string): string {
+  const clean = (raw || '').trim().toUpperCase();
+  if (!clean) return '';
+  if (clean === 'UK') return 'GB';
+  if (clean === 'UAE') return 'AE';
+  if (clean === 'USA') return 'US';
+  if (clean === 'AUS') return 'AU';
+  if (clean === 'CAN') return 'CA';
+  return /^[A-Z]{2}$/.test(clean) ? clean : '';
+}
+
 async function fetchAdsterraStatsGroup(params: {
   apiKey: string;
   startDate: string;
@@ -449,8 +460,9 @@ async function fetchAdsterraStatsGroup(params: {
   if (params.placementId && /^\d+$/.test(params.placementId.trim())) {
     qs.set('placement', params.placementId.trim());
   }
-  if (params.country && /^[a-zA-Z]{2}$/.test(params.country.trim())) {
-    qs.set('country', params.country.trim().toUpperCase());
+  const normalizedCountry = normalizeAdsterraGeoCode(params.country);
+  if (normalizedCountry) {
+    qs.set('country', normalizedCountry);
   }
 
   const res = await fetch(`${ADSTERRA_API_BASE}/stats.json?${qs.toString()}`, {
@@ -893,6 +905,23 @@ export function createApp() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get('/api/geo', (req, res) => {
+    const rawCountry =
+      (req.headers['cf-ipcountry'] as string | undefined) ||
+      (req.headers['x-vercel-ip-country'] as string | undefined) ||
+      (req.headers['x-country-code'] as string | undefined) ||
+      (req.headers['x-country'] as string | undefined) ||
+      (req.headers['x-appengine-country'] as string | undefined) ||
+      '';
+    const normalized = normalizeAdsterraGeoCode(rawCountry);
+    const countryCode = normalized && normalized !== 'XX' ? normalized : 'XX';
+    const tier1Set = new Set(['US', 'GB', 'AE', 'AU', 'CA', 'UA', 'DE']);
+    res.json({
+      countryCode,
+      isTier1: tier1Set.has(countryCode),
+    });
   });
 
   app.get('/api/adsterra/status', requireVerifiedFirebaseUser, (req: AuthenticatedRequest, res) => {

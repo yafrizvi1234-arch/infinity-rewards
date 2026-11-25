@@ -23,12 +23,14 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { formatCooldownDuration } from '../services/linkService';
 import {
   AdsterraBackendStatus,
   LINK_CATEGORIES,
   LinkVisitRecord,
   ManagedLink,
   SuggestedUser,
+  TARGET_GEO_OPTIONS,
   UserPersonalSmartlink,
   VisitMode,
   VisitTab,
@@ -38,6 +40,7 @@ import { Avatar } from './Avatar';
 
 interface HomeDashboardProps {
   currentUid: string;
+  visitorGeoCode?: string;
   demoPoints: number;
   totalVisits: number;
   visitedToday: number;
@@ -105,6 +108,7 @@ function formatShortDateTime(ms: number): string {
 
 export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   currentUid,
+  visitorGeoCode = 'XX',
   demoPoints,
   totalVisits,
   visitedToday,
@@ -154,6 +158,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [selectedGeoFilter, setSelectedGeoFilter] = useState<string>('ALL');
   const [multiBatchIds, setMultiBatchIds] = useState<string[]>([]);
   const [publishingUrl, setPublishingUrl] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -226,6 +231,16 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
       if (selectedCategory !== 'All' && link.category !== selectedCategory) {
         return false;
       }
+      if (selectedGeoFilter !== 'ALL') {
+        const geos = (link.targetGeos && link.targetGeos.length > 0
+          ? link.targetGeos
+          : ['US', 'UK', 'UAE', 'AU']
+        ).map((g) => g.toUpperCase());
+        const normalizedTarget = selectedGeoFilter === 'GB' ? 'UK' : selectedGeoFilter === 'AE' ? 'UAE' : selectedGeoFilter;
+        if (!geos.includes(selectedGeoFilter) && !geos.includes(normalizedTarget) && !geos.includes('GLOBAL')) {
+          return false;
+        }
+      }
       if (!q) return true;
       return (
         link.title.toLowerCase().includes(q) ||
@@ -235,7 +250,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
         link.ownerUsername.toLowerCase().includes(q)
       );
     });
-  }, [currentUid, queueLinks, searchQuery, selectedCategory]);
+  }, [currentUid, queueLinks, searchQuery, selectedCategory, selectedGeoFilter]);
 
   const recentLinkOpens = useMemo(() => myLinkVisits.slice(0, 5), [myLinkVisits]);
 
@@ -244,39 +259,58 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     [multiBatchIds]
   );
 
+  // Strict 1-owner-per-slot Multi (5) batch: max 1 link per unique ownerId per batch
   const multiBatchLinks = useMemo(() => {
     const availableById = new Map(availableLinks.map((l) => [l.id, l]));
     const picked: ManagedLink[] = [];
     const usedIds = new Set<string>();
+    const usedOwners = new Set<string>();
+
+    const tryPick = (candidate?: ManagedLink) => {
+      if (!candidate || picked.length >= 5) return;
+      if (usedIds.has(candidate.id) || usedOwners.has(candidate.ownerId)) return;
+      picked.push(candidate);
+      usedIds.add(candidate.id);
+      usedOwners.add(candidate.ownerId);
+    };
 
     for (const id of multiBatchIds) {
       if (picked.length >= 5) break;
-      const found = availableById.get(id);
-      if (found && !usedIds.has(found.id)) {
-        picked.push(found);
-        usedIds.add(found.id);
-      }
+      tryPick(availableById.get(id));
     }
 
     for (const candidate of availableLinks) {
       if (picked.length >= 5) break;
-      if (!usedIds.has(candidate.id)) {
-        picked.push(candidate);
-        usedIds.add(candidate.id);
-      }
+      tryPick(candidate);
     }
 
     return picked;
   }, [availableLinks, multiBatchIds]);
 
+  const availableDistinctOwnersCount = useMemo(() => {
+    const owners = new Set<string>();
+    for (const link of availableLinks) {
+      owners.add(link.ownerId);
+    }
+    return owners.size;
+  }, [availableLinks]);
+
   const toggleMultiBatchSelection = (linkId: string) => {
     if (isMulti5Active && visitMode !== 'multi') {
       onChangeVisitMode('multi');
     }
+    const target = availableLinks.find((l) => l.id === linkId);
     setMultiBatchIds((prev) => {
       if (prev.includes(linkId)) return prev.filter((id) => id !== linkId);
-      if (prev.length >= 5) return [...prev.slice(1), linkId];
-      return [...prev, linkId];
+      // Enforce 1 link per owner inside pinned batch: replace any existing pick from the same owner
+      const filteredSameOwner = target
+        ? prev.filter((id) => {
+            const existing = availableLinks.find((l) => l.id === id);
+            return !existing || existing.ownerId !== target.ownerId;
+          })
+        : prev;
+      if (filteredSameOwner.length >= 5) return [...filteredSameOwner.slice(1), linkId];
+      return [...filteredSameOwner, linkId];
     });
   };
 
@@ -554,98 +588,102 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
           {/* Action / Multi Batch */}
           {isMulti5Active && visitMode === 'multi' ? (
             <div className="mt-4 space-y-3 rounded-2xl border border-[#FF2E93]/35 bg-[#090B21]/80 p-4 shadow-[0_0_24px_-10px_rgba(255,46,147,0.35)]">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <span className="font-bold text-[#FF8DC7]">
-                  Multi (5) Concurrent Queue ({multiBatchLinks.length}/5 slots)
-                </span>
-                <div className="flex items-center gap-3">
-                  {multiBatchIds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setMultiBatchIds([])}
-                      className="font-semibold text-slate-300 hover:text-white"
-                    >
-                      Clear Picks ({multiBatchIds.length})
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={onOpenProLocked}
-                    className="font-semibold text-[#00F5FF] hover:underline"
-                  >
-                    {isAdmin ? 'PRO Status' : 'Receipt'}
-                  </button>
-                </div>
-              </div>
-
-              {multiBatchLinks.length === 0 ? (
-                <div className="space-y-2.5">
-                  <p className="text-xs text-slate-300">
-                    {totalLinksInTab === 0
-                      ? `Waiting for other members to publish ${visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'}. Your own links are hidden from your queue.`
-                      : `All ${totalLinksInTab} links are on cooldown — live queue will resume automatically.`}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => onStartAutoVisit()}
-                    className="neon-btn-primary flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2 text-xs font-bold"
-                  >
-                    <Play className="h-4 w-4" />
-                    <span>
-                      {totalLinksInTab === 0
-                        ? 'Open Live Listener (Auto-Starts on New Member)'
-                        : 'Open Auto-Resume Queue'}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="font-bold text-[#FF8DC7]">
+                      Multi (5) Unique-Owner Queue ({multiBatchLinks.length}/5 slots · 5 different owners)
                     </span>
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onStartAutoVisit(
-                        multiBatchLinks[0]?.id,
-                        multiBatchLinks.map((l) => l.id)
-                      )
-                    }
-                    className="neon-btn-primary flex min-h-[46px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-bold"
-                  >
-                    <Play className="h-4 w-4" />
-                    <span>
-                      Auto Visit All ({multiBatchLinks.length} at once)
-                    </span>
-                  </button>
-
-                  {availableLinks.length < 5 && (
-                    <p className="text-[11px] text-slate-300">
-                      {availableLinks.length} of 5 slots ready in {visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'} right now — extra slots fill automatically as more members publish or finish cooldown.
-                    </p>
-                  )}
-
-                  <div className="space-y-2">
-                    {multiBatchLinks.map((batchItem, idx) => (
-                      <div
-                        key={batchItem.id}
-                        className="flex items-center justify-between gap-3 rounded-xl border border-[#B84DFF]/25 bg-[#050817]/85 px-3 py-2"
+                    <div className="flex items-center gap-3">
+                      {multiBatchIds.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setMultiBatchIds([])}
+                          className="font-semibold text-slate-300 hover:text-white"
+                        >
+                          Clear Picks ({multiBatchIds.length})
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={onOpenProLocked}
+                        className="font-semibold text-[#00F5FF] hover:underline"
                       >
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <span className="font-mono-num flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#FF2E93]/30 to-[#B84DFF]/30 text-xs font-bold text-[#FF9AD0]">
-                            {idx + 1}
-                          </span>
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-white">
-                              {batchItem.title}
-                              {pinnedBatchIdsSet.has(batchItem.id) && (
-                                <span className="ml-1.5 text-[10px] font-bold text-[#00F5FF]">
-                                  · Pinned
-                                </span>
-                              )}
-                            </p>
-                            <p className="truncate text-[11px] text-slate-400">
-                              {batchItem.domain} · {batchItem.category}
-                            </p>
-                          </div>
-                        </div>
+                        {isAdmin ? 'PRO Status' : 'Receipt'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {multiBatchLinks.length === 0 ? (
+                    <div className="space-y-2.5">
+                      <p className="text-xs text-slate-300">
+                        {totalLinksInTab === 0
+                          ? `Waiting for other members to publish ${visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'}. Your own links are hidden from your queue.`
+                          : `All ${totalLinksInTab} links are on 12–24h cooldown — live queue will resume automatically.`}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => onStartAutoVisit()}
+                        className="neon-btn-primary flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2 text-xs font-bold"
+                      >
+                        <Play className="h-4 w-4" />
+                        <span>
+                          {totalLinksInTab === 0
+                            ? 'Open Live Listener (Auto-Starts on New Member)'
+                            : 'Open Auto-Resume Queue'}
+                        </span>
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onStartAutoVisit(
+                            multiBatchLinks[0]?.id,
+                            multiBatchLinks.map((l) => l.id)
+                          )
+                        }
+                        className="neon-btn-primary flex min-h-[46px] w-full items-center justify-center gap-2 rounded-2xl px-5 py-2.5 text-sm font-bold"
+                      >
+                        <Play className="h-4 w-4" />
+                        <span>
+                          Auto Visit ({multiBatchLinks.length} Unique Owners · 20–35s Dwell)
+                        </span>
+                      </button>
+
+                      {availableDistinctOwnersCount < 5 && (
+                        <p className="text-[11px] text-slate-300">
+                          {availableDistinctOwnersCount} of 5 unique owners ready in{' '}
+                          {visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'} right now — each Multi (5) batch enforces max 1 link per owner.
+                        </p>
+                      )}
+
+                      <div className="space-y-2">
+                        {multiBatchLinks.map((batchItem, idx) => (
+                          <div
+                            key={batchItem.id}
+                            className="flex items-center justify-between gap-3 rounded-xl border border-[#B84DFF]/25 bg-[#050817]/85 px-3 py-2"
+                          >
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <span className="font-mono-num flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#FF2E93]/30 to-[#B84DFF]/30 text-xs font-bold text-[#FF9AD0]">
+                                {idx + 1}
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-xs font-semibold text-white">
+                                  {batchItem.title}
+                                  {pinnedBatchIdsSet.has(batchItem.id) && (
+                                    <span className="ml-1.5 text-[10px] font-bold text-[#00F5FF]">
+                                      · Pinned
+                                    </span>
+                                  )}
+                                </p>
+                                <p className="truncate text-[11px] text-slate-400">
+                                  {batchItem.ownerName} · {batchItem.domain}
+                                  {batchItem.targetGeos && batchItem.targetGeos.length > 0
+                                    ? ` · ${batchItem.targetGeos.slice(0, 3).join('/')}`
+                                    : ''}
+                                </p>
+                              </div>
+                            </div>
                         <button
                           type="button"
                           onClick={() =>
@@ -722,7 +760,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                   <Clock className="h-4 w-4 text-[#C084FC]" />
                   <span>
                     {shortestCooldownLink
-                      ? `Cooldown (${shortestCooldownLink.remainingSec}s) · Queue Auto Visit`
+                      ? `Cooldown (${formatCooldownDuration(shortestCooldownLink.remainingSec)}) · Queue Auto Visit`
                       : 'Open Auto-Resume Queue'}
                   </span>
                 </button>
@@ -849,12 +887,17 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-2.5 text-xs text-slate-400">
-                  <span className="truncate">{nextUpLink.domain}</span>
+                  <span className="truncate">
+                    {nextUpLink.domain}
+                    {nextUpLink.targetGeos && nextUpLink.targetGeos.length > 0
+                      ? ` · ${nextUpLink.targetGeos.slice(0, 4).join('/')}`
+                      : ' · US/UK/UAE/AU'}
+                  </span>
                   <span className="font-mono-num shrink-0">
                     <span className={nextUpLink.isHttps ? 'text-[#00FF87]' : 'text-[#FFB800]'}>
                       {nextUpLink.isHttps ? 'HTTPS' : 'HTTP'}
                     </span>{' '}
-                    · {nextUpLink.cooldownSec}s
+                    · {formatCooldownDuration(Math.max(43200, nextUpLink.cooldownSec))} cd
                   </span>
                 </div>
               </div>
@@ -862,11 +905,11 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
               <div className="mt-4 rounded-2xl border border-white/10 bg-slate-900/45 p-6 text-center">
                 <Clock className="mx-auto h-6 w-6 text-purple-300" />
                 <p className="mt-2 text-sm font-semibold text-white">
-                  {totalLinksInTab === 0 ? 'No Links Yet' : 'Cooling Down'}
+                  {totalLinksInTab === 0 ? 'No Links Yet' : 'Cooling Down (12–24h)'}
                 </p>
                 {shortestCooldownLink && (
                   <p className="font-mono-num mt-1 text-xs text-slate-400">
-                    Ready in {shortestCooldownLink.remainingSec}s
+                    Ready in {formatCooldownDuration(shortestCooldownLink.remainingSec)}
                   </p>
                 )}
                 {removedCountInTab > 0 && (
@@ -901,9 +944,16 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
       {/* Approved Directory */}
       <section aria-label="Approved links directory" className="glass-panel rounded-3xl p-5 sm:p-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="font-display text-lg font-bold text-white">
-            Live {visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'}
-          </h2>
+          <div>
+            <h2 className="font-display text-lg font-bold text-white">
+              Live {visitTab === 'smartlink' ? 'Smartlinks' : 'Websites'}
+            </h2>
+            {visitorGeoCode && visitorGeoCode !== 'XX' && (
+              <p className="text-[11px] text-slate-400">
+                Your detected region: <span className="font-semibold text-[#00FF87]">{visitorGeoCode}</span>
+              </p>
+            )}
+          </div>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <div className="relative">
@@ -913,8 +963,27 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search links..."
-                className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-950/70 py-1.5 pr-3 pl-9 text-xs text-white placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none sm:w-52"
+                className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-950/70 py-1.5 pr-3 pl-9 text-xs text-white placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none sm:w-44"
               />
+            </div>
+
+            <div className="relative flex items-center">
+              <Globe className="pointer-events-none absolute left-3 h-3.5 w-3.5 text-[#00FF87]" />
+              <select
+                aria-label="Filter by target GEO"
+                value={selectedGeoFilter}
+                onChange={(e) => setSelectedGeoFilter(e.target.value)}
+                className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-950/70 py-1.5 pr-3 pl-8 text-xs text-white focus:border-[#00FF87] focus:outline-none sm:w-36"
+              >
+                <option value="ALL" className="bg-slate-900">
+                  All GEOs
+                </option>
+                {TARGET_GEO_OPTIONS.map((geo) => (
+                  <option key={geo.code} value={geo.code} className="bg-slate-900">
+                    {geo.flag} {geo.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="relative flex items-center">
@@ -923,7 +992,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                 aria-label="Filter by category"
                 value={selectedCategory}
                 onChange={(e) => setSelectedCategory(e.target.value)}
-                className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-950/70 py-1.5 pr-3 pl-8 text-xs text-white focus:border-cyan-400 focus:outline-none sm:w-40"
+                className="min-h-[38px] w-full rounded-xl border border-white/15 bg-slate-950/70 py-1.5 pr-3 pl-8 text-xs text-white focus:border-cyan-400 focus:outline-none sm:w-36"
               >
                 <option value="All" className="bg-slate-900">
                   All Categories
@@ -991,6 +1060,15 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                       {item.domain} ·{' '}
                       <span className={item.isHttps ? 'text-[#00FF87]' : 'text-[#FFB800]'}>
                         {item.isHttps ? 'HTTPS' : 'HTTP'}
+                      </span>{' '}
+                      ·{' '}
+                      <span className="text-[#00F5FF]">
+                        {(item.targetGeos && item.targetGeos.length > 0
+                          ? item.targetGeos
+                          : ['US', 'UK', 'UAE', 'AU']
+                        )
+                          .slice(0, 3)
+                          .join('/')}
                       </span>
                     </span>
 
@@ -1033,7 +1111,9 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                         className="neon-btn-primary flex min-h-[34px] items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold"
                       >
                         <Play className="h-3.5 w-3.5" />
-                        <span>{cdRemaining > 0 ? `${cdRemaining}s` : 'Visit'}</span>
+                        <span>
+                          {cdRemaining > 0 ? formatCooldownDuration(cdRemaining) : 'Visit'}
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -1091,7 +1171,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
                         remaining > 0 ? 'text-[#C084FC]' : 'text-[#00FF87]'
                       }`}
                     >
-                      {remaining > 0 ? `${remaining}s` : 'Ready'}
+                      {remaining > 0 ? formatCooldownDuration(remaining) : 'Ready'}
                     </span>
                   </div>
                 );

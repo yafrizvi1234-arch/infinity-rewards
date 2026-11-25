@@ -170,6 +170,18 @@ export const LINK_CATEGORIES = [
   'Other',
 ] as const;
 
+export const TARGET_GEO_OPTIONS = [
+  { code: 'US', iso: 'US', label: 'US', flag: '🇺🇸' },
+  { code: 'UK', iso: 'GB', label: 'UK', flag: '🇬🇧' },
+  { code: 'UAE', iso: 'AE', label: 'UAE', flag: '🇦🇪' },
+  { code: 'AU', iso: 'AU', label: 'AU', flag: '🇦🇺' },
+  { code: 'UA', iso: 'UA', label: 'UA', flag: '🇺🇦' },
+  { code: 'CA', iso: 'CA', label: 'CA', flag: '🇨🇦' },
+  { code: 'GLOBAL', iso: 'GLOBAL', label: 'Global', flag: '🌍' },
+] as const;
+
+export const DEFAULT_TIER1_TARGET_GEOS: string[] = ['US', 'UK', 'UAE', 'AU'];
+
 export interface ManagedLink {
   id: string;
   ownerId: string;
@@ -187,6 +199,7 @@ export interface ManagedLink {
   category: string;
   status: LinkStatus;
   cooldownSec: number;
+  targetGeos?: string[];
   reportCount: number;
   moderationNote?: string;
   moderatedBy?: string;

@@ -396,7 +396,12 @@
           "enum": ["pending", "approved", "rejected"]
         },
         "cooldownSec": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Randomized per-visitor spam-prevention cooldown between 43200 (12h) and 86400 (24h) seconds."
+        },
+        "targetGeos": {
+          "type": "array",
+          "description": "Optional target GEO tags (e.g. US, UK, UAE, AU, CA, UA, GLOBAL)."
         },
         "reportCount": {
           "type": "integer"

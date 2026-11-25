@@ -25,6 +25,7 @@ import { logoutUser } from './services/authService';
 import {
   DEFAULT_SPAM_COOLDOWN_SEC,
   checkIsAdminUser,
+  clampSafeCooldownSec,
   deleteLinkSecure,
   moderateLinkSecure,
   recordExternalLinkOpen,
@@ -58,6 +59,7 @@ import {
   disconnectMyAdsterraIntegration,
   fetchAdsterraBackendStatus,
   fetchAdsterraDetailedStats,
+  getConfiguredApiBaseUrl,
   saveMyAdsterraIntegration,
   subscribeMyAdsterraIntegration,
   subscribeMyPersonalSmartlinks,
@@ -80,6 +82,7 @@ import {
   AdsterraDatePreset,
   AdsterraIntegrationRecord,
   AppPersistedState,
+  DEFAULT_TIER1_TARGET_GEOS,
   FollowRelation,
   LinkReportRecord,
   LinkVisitRecord,
@@ -278,6 +281,7 @@ export default function App() {
     useState<AdsterraBackendStatus>(DEFAULT_BACKEND_STATUS);
   const [personalSmartlinks, setPersonalSmartlinks] = useState<UserPersonalSmartlink[]>([]);
   const [personalSmartlinksHydrated, setPersonalSmartlinksHydrated] = useState<boolean>(false);
+  const [visitorGeoCode, setVisitorGeoCode] = useState<string>('XX');
 
   const [previousScreen, setPreviousScreen] = useState<MainScreen>('home');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -715,7 +719,31 @@ export default function App() {
     };
   }, [authUser, isEmailVerified, isAdmin, retryNonce]);
 
-  // Hydrate active spam-prevention cooldowns from Firestore linkVisits on reload
+  // Detect honest visitor GEO country header once per authenticated session
+  useEffect(() => {
+    if (!authUser || !isEmailVerified) {
+      setVisitorGeoCode('XX');
+      return;
+    }
+    let cancelled = false;
+    const base = getConfiguredApiBaseUrl();
+    const endpoint = base ? `${base}/api/geo` : '/api/geo';
+    fetch(endpoint, { headers: { Accept: 'application/json' } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { countryCode?: string } | null) => {
+        if (!cancelled && data?.countryCode) {
+          setVisitorGeoCode(String(data.countryCode).trim().toUpperCase());
+        }
+      })
+      .catch(() => {
+        // Ignore network errors cleanly
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, isEmailVerified]);
+
+  // Hydrate active 12-24h spam-prevention cooldowns from Firestore linkVisits on reload
   useEffect(() => {
     if (myLinkVisits.length === 0) return;
     const current = Date.now();
@@ -728,7 +756,7 @@ export default function App() {
       let changed = false;
       const nextCooldowns = { ...prev.cooldowns };
       for (const visit of myLinkVisits) {
-        const sec = cooldownByLinkId.get(visit.linkId) ?? DEFAULT_SPAM_COOLDOWN_SEC;
+        const sec = clampSafeCooldownSec(cooldownByLinkId.get(visit.linkId));
         const expiresAt = visit.createdAtMs + sec * 1000;
         if (expiresAt > current && expiresAt > (nextCooldowns[visit.linkId] ?? 0)) {
           nextCooldowns[visit.linkId] = expiresAt;
@@ -902,14 +930,19 @@ export default function App() {
     });
   };
 
-  // Complete a dwell cycle for an auto-visited link (strictly other members' links; never self-visit)
+  // Complete a dwell cycle (20-35s) for an auto-visited link with 12-24h cooldown (never self-visit)
   const handleCompleteAutoVisit = useCallback(
-    async (item: AutoVisitQueueItem) => {
+    async (item: AutoVisitQueueItem, dwellSec?: number) => {
       if (!authUser) return;
       if (!item.managedLink || item.managedLink.ownerId === authUser.uid) {
         return;
       }
-      const expiresAt = Date.now() + Math.max(15, item.cooldownSec) * 1000;
+      const safeCooldownSec = clampSafeCooldownSec(item.cooldownSec);
+      const safeDwellSec =
+        typeof dwellSec === 'number' && Number.isFinite(dwellSec)
+          ? Math.max(20, Math.min(35, Math.round(dwellSec)))
+          : 25;
+      const expiresAt = Date.now() + safeCooldownSec * 1000;
       setState((prev) => ({
         ...prev,
         cooldowns: {
@@ -946,9 +979,9 @@ export default function App() {
                 userHandle: item.managedLink?.ownerUsername ?? `@${snapshot.username}`,
                 userAvatar: item.managedLink?.ownerAvatar ?? snapshot.avatar,
                 category: item.category,
-                durationSec: 8,
+                durationSec: safeDwellSec,
                 demoPoints: 10,
-                cooldownSec: item.cooldownSec,
+                cooldownSec: safeCooldownSec,
                 previewSummary: '',
                 destinationDomain: item.domain,
               },
@@ -1004,6 +1037,7 @@ export default function App() {
     description: string;
     rawUrl: string;
     category: string;
+    targetGeos?: string[];
   }) => {
     if (!authUser) return;
     await submitLinkSecure({
@@ -1028,6 +1062,7 @@ export default function App() {
       description: string;
       rawUrl: string;
       category: string;
+      targetGeos?: string[];
     }
   ) => {
     if (!authUser) return;
@@ -1273,6 +1308,7 @@ export default function App() {
                 'Adsterra Smartlink auto-shared for mutual real human community visits.',
               rawUrl: entry.url,
               category: entry.category,
+              targetGeos: DEFAULT_TIER1_TARGET_GEOS,
             });
             publishedCount += 1;
             knownCommunityUrls.add(entry.normalized);
@@ -1692,12 +1728,45 @@ export default function App() {
       }
     }
 
-    // Order each member's links newest-first, then sort members fairly by reciprocal exchange activity
+    // Order each member's links prioritizing GEO match / Tier-1 targets, then newest-first
+    const visitorAlias =
+      visitorGeoCode === 'GB'
+        ? 'UK'
+        : visitorGeoCode === 'AE'
+          ? 'UAE'
+          : visitorGeoCode;
+
+    const getGeoPriority = (link: ManagedLink): number => {
+      const geos = (
+        link.targetGeos && link.targetGeos.length > 0
+          ? link.targetGeos
+          : DEFAULT_TIER1_TARGET_GEOS
+      ).map((g) => g.toUpperCase());
+      if (
+        visitorGeoCode &&
+        visitorGeoCode !== 'XX' &&
+        (geos.includes(visitorGeoCode) || geos.includes(visitorAlias))
+      ) {
+        return 3;
+      }
+      if (
+        geos.some((g) => g === 'US' || g === 'UK' || g === 'GB' || g === 'UAE' || g === 'AE' || g === 'AU' || g === 'UA')
+      ) {
+        return 2;
+      }
+      return geos.includes('GLOBAL') ? 1 : 0;
+    };
+
     const ownerBuckets = Array.from(bucketsByOwner.entries()).map(([ownerId, items]) => {
-      items.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+      items.sort((a, b) => {
+        const diff = getGeoPriority(b) - getGeoPriority(a);
+        if (diff !== 0) return diff;
+        return b.updatedAtMs - a.updatedAtMs;
+      });
       return {
         ownerId,
         contributorVisits: visitsByUid.get(ownerId) ?? 0,
+        topGeoPriority: items[0] ? getGeoPriority(items[0]) : 0,
         latestUpdateMs: items[0]?.updatedAtMs ?? 0,
         items,
       };
@@ -1706,6 +1775,9 @@ export default function App() {
     ownerBuckets.sort((a, b) => {
       if (a.contributorVisits !== b.contributorVisits) {
         return b.contributorVisits - a.contributorVisits;
+      }
+      if (a.topGeoPriority !== b.topGeoPriority) {
+        return b.topGeoPriority - a.topGeoPriority;
       }
       return b.latestUpdateMs - a.latestUpdateMs;
     });
@@ -1730,7 +1802,7 @@ export default function App() {
       ownLiveLinksInTab: ownLive,
       otherContributorsCount: ownerBuckets.length,
     };
-  }, [approvedLinks, authUser?.uid, publicProfiles, state.visitTab]);
+  }, [approvedLinks, authUser?.uid, publicProfiles, state.visitTab, visitorGeoCode]);
 
   // Queue excludes user-removed items
   const removedSet = useMemo(
@@ -1786,7 +1858,8 @@ export default function App() {
           domain: item.domain,
           category: item.category,
           type: item.type,
-          cooldownSec: item.cooldownSec || DEFAULT_SPAM_COOLDOWN_SEC,
+          cooldownSec: clampSafeCooldownSec(item.cooldownSec || DEFAULT_SPAM_COOLDOWN_SEC),
+          targetGeos: item.targetGeos,
           isCommunityLink: true,
           managedLink: item,
         })),
@@ -1950,6 +2023,7 @@ export default function App() {
               {state.activeScreen === 'home' && (
                 <HomeDashboard
                   currentUid={authUser.uid}
+                  visitorGeoCode={visitorGeoCode}
                   demoPoints={state.demoPoints}
                   totalVisits={state.totalVisits}
                   visitedToday={state.visitedToday}
@@ -2228,6 +2302,7 @@ export default function App() {
         visitMode={visitMode}
         cooldowns={state.cooldowns}
         nowMs={nowMs}
+        visitorGeoCode={visitorGeoCode}
         onChangeVisitMode={(mode) => {
           if (mode === 'multi' && !isMulti5Active) {
             setIsProModalOpen(true);

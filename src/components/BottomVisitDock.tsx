@@ -14,8 +14,13 @@ import {
   ShieldCheck,
   SkipForward,
   Sparkles,
+  Users,
   X,
 } from 'lucide-react';
+import {
+  clampSafeCooldownSec,
+  formatCooldownDuration,
+} from '../services/linkService';
 import { ManagedLink, VisitMode, VisitTab } from '../types';
 
 export interface AutoVisitQueueItem {
@@ -26,6 +31,7 @@ export interface AutoVisitQueueItem {
   category: string;
   type: VisitTab;
   cooldownSec: number;
+  targetGeos?: string[];
   isCommunityLink: boolean;
   managedLink?: ManagedLink;
 }
@@ -40,8 +46,9 @@ interface BottomVisitDockProps {
   visitMode: VisitMode;
   cooldowns: Record<string, number>;
   nowMs: number;
+  visitorGeoCode?: string;
   onChangeVisitMode?: (mode: VisitMode) => void;
-  onCompleteLinkVisit: (item: AutoVisitQueueItem) => Promise<void>;
+  onCompleteLinkVisit: (item: AutoVisitQueueItem, dwellSec?: number) => Promise<void>;
   onOpenProLocked: () => void;
   onClose: () => void;
 }
@@ -65,12 +72,10 @@ interface CelebrationBurst {
   count: number;
 }
 
-const SINGLE_DWELL_MIN_SEC = 18;
-const SINGLE_DWELL_MAX_SEC = 26;
-const STAGGER_MIN_MS = 4000;
-const STAGGER_MAX_MS = 7500;
-const POST_LAST_OPEN_MIN_SEC = 14;
-const POST_LAST_OPEN_MAX_SEC = 18;
+const DWELL_MIN_SEC = 20;
+const DWELL_MAX_SEC = 35;
+const STAGGER_MIN_MS = 3800;
+const STAGGER_MAX_MS = 8600;
 const TICK_INTERVAL_MS = 250;
 const MULTI_CONCURRENCY_LIMIT = 5;
 const CELEBRATION_DURATION_MS = 950;
@@ -81,37 +86,67 @@ function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (high - low + 1)) + low;
 }
 
+function getItemOwnerKey(item: AutoVisitQueueItem): string {
+  return item.managedLink?.ownerId || `slot_${item.id}`;
+}
+
 function buildStaggerSchedule(batchIds: string[]): {
   openAtMsById: Record<string, number>;
+  dwellSecById: Record<string, number>;
   cycleDurationSec: number;
 } {
   const openAtMsById: Record<string, number> = {};
+  const dwellSecById: Record<string, number> = {};
+
   if (batchIds.length === 0) {
-    return { openAtMsById, cycleDurationSec: SINGLE_DWELL_MIN_SEC };
+    return {
+      openAtMsById,
+      dwellSecById,
+      cycleDurationSec: DWELL_MIN_SEC,
+    };
   }
 
   let cumulativeMs = 0;
+  let prevGapMs = 0;
+
   batchIds.forEach((id, idx) => {
     if (idx === 0) {
       openAtMsById[id] = 0;
-    } else {
-      cumulativeMs += randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
-      openAtMsById[id] = cumulativeMs;
+      return;
     }
+    // Non-fixed randomized human delay between 3.8s and 8.6s (avoid repeating exact 5000ms or identical gaps)
+    let gapMs = randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
+    if (Math.abs(gapMs - 5000) < 250 || Math.abs(gapMs - prevGapMs) < 400) {
+      gapMs = gapMs < 5500 ? randomInt(6100, STAGGER_MAX_MS) : randomInt(STAGGER_MIN_MS, 4650);
+    }
+    prevGapMs = gapMs;
+    cumulativeMs += gapMs;
+    openAtMsById[id] = cumulativeMs;
   });
 
   if (batchIds.length === 1) {
+    const singleDwell = randomInt(DWELL_MIN_SEC, DWELL_MAX_SEC);
+    dwellSecById[batchIds[0]] = singleDwell;
     return {
       openAtMsById,
-      cycleDurationSec: randomInt(SINGLE_DWELL_MIN_SEC, SINGLE_DWELL_MAX_SEC),
+      dwellSecById,
+      cycleDurationSec: singleDwell,
     };
   }
 
   const lastOpenSec = Math.ceil(cumulativeMs / 1000);
-  const postLastDwellSec = randomInt(POST_LAST_OPEN_MIN_SEC, POST_LAST_OPEN_MAX_SEC);
+  const postLastDwellSec = randomInt(DWELL_MIN_SEC, DWELL_MAX_SEC);
+  const cycleDurationSec = lastOpenSec + postLastDwellSec;
+
+  for (const id of batchIds) {
+    const openSec = Math.floor((openAtMsById[id] ?? 0) / 1000);
+    dwellSecById[id] = Math.max(DWELL_MIN_SEC, cycleDurationSec - openSec);
+  }
+
   return {
     openAtMsById,
-    cycleDurationSec: Math.max(32, lastOpenSec + postLastDwellSec),
+    dwellSecById,
+    cycleDurationSec,
   };
 }
 
@@ -144,6 +179,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   visitMode,
   cooldowns,
   nowMs,
+  visitorGeoCode = 'XX',
   onChangeVisitMode,
   onCompleteLinkVisit,
   onOpenProLocked,
@@ -156,7 +192,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   const [isPaused, setIsPaused] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   const [isExpanded, setIsExpanded] = useState(false);
-  const [cycleDurationSec, setCycleDurationSec] = useState(SINGLE_DWELL_MIN_SEC);
+  const [cycleDurationSec, setCycleDurationSec] = useState(DWELL_MIN_SEC);
   const [elapsedActiveMs, setElapsedActiveMs] = useState(0);
   const [activeBatchIds, setActiveBatchIds] = useState<string[]>([]);
   const [openAtMsById, setOpenAtMsById] = useState<Record<string, number>>({});
@@ -168,8 +204,9 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
   const cursorRef = useRef(0);
   const elapsedActiveMsRef = useRef(0);
-  const cycleDurationSecRef = useRef(SINGLE_DWELL_MIN_SEC);
+  const cycleDurationSecRef = useRef(DWELL_MIN_SEC);
   const openAtMsByIdRef = useRef<Record<string, number>>({});
+  const dwellSecByIdRef = useRef<Record<string, number>>({});
   const userSelectedTabInBatchRef = useRef(false);
   const lastAutoFocusedIdRef = useRef<string | null>(null);
   const localHoldUntilRef = useRef<Record<string, number>>({});
@@ -207,7 +244,6 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     return () => clearCelebrationTimer();
   }, [clearCelebrationTimer]);
 
-  // Refs for latest props so intervals and async Promise.all batches never hold stale closures
   const linksRef = useRef(links);
   linksRef.current = links;
 
@@ -238,7 +274,8 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     return Math.max(cooldownsRef.current[item.id] ?? 0, localHoldUntilRef.current[item.id] ?? 0);
   }, []);
 
-  // Pick next batch prioritizing distinct owners/domains so no single publisher fires repeatedly in the same burst
+  // STRICT Multi (5) Batch Picker:
+  // Every link inside a batch MUST belong to a distinct ownerId (max 1 link per owner per batch).
   const pickNextBatch = useCallback(
     (
       preferredFirstId?: string | null,
@@ -257,20 +294,24 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       const picked: AutoVisitQueueItem[] = [];
       const usedIds = new Set<string>();
       const usedOwners = new Set<string>();
-      const usedDomains = new Set<string>();
+
+      const canPickDistinctOwner = (item: AutoVisitQueueItem) => {
+        if (usedIds.has(item.id)) return false;
+        const ownerKey = getItemOwnerKey(item);
+        return !usedOwners.has(ownerKey);
+      };
 
       const addCandidate = (item: AutoVisitQueueItem) => {
         picked.push(item);
         usedIds.add(item.id);
-        if (item.managedLink?.ownerId) usedOwners.add(item.managedLink.ownerId);
-        if (item.domain) usedDomains.add(item.domain.toLowerCase());
+        usedOwners.add(getItemOwnerKey(item));
       };
 
       let startIdx = cursorRef.current % ready.length;
 
       if (preferredFirstId) {
         const preferredReadyIdx = ready.findIndex((item) => item.id === preferredFirstId);
-        if (preferredReadyIdx >= 0) {
+        if (preferredReadyIdx >= 0 && canPickDistinctOwner(ready[preferredReadyIdx])) {
           addCandidate(ready[preferredReadyIdx]);
           startIdx = (preferredReadyIdx + 1) % ready.length;
         }
@@ -279,27 +320,17 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       if (preferredIds && preferredIds.length > 0 && picked.length < limit) {
         for (const prefId of preferredIds) {
           if (picked.length >= limit) break;
-          if (usedIds.has(prefId)) continue;
           const candidate = ready.find((item) => item.id === prefId);
-          if (candidate) addCandidate(candidate);
+          if (candidate && canPickDistinctOwner(candidate)) {
+            addCandidate(candidate);
+          }
         }
       }
 
-      // Pass 1: diversify by distinct publisher & domain
+      // Strictly pick distinct owners only (no duplicate owner allowed in the same Multi-5 batch)
       for (let offset = 0; offset < ready.length && picked.length < limit; offset++) {
         const candidate = ready[(startIdx + offset) % ready.length];
-        if (usedIds.has(candidate.id)) continue;
-        const ownerId = candidate.managedLink?.ownerId || '';
-        const domainKey = candidate.domain.toLowerCase();
-        if (ownerId && usedOwners.has(ownerId)) continue;
-        if (domainKey && usedDomains.has(domainKey)) continue;
-        addCandidate(candidate);
-      }
-
-      // Pass 2: fill any remaining slots if fewer unique publishers/domains are ready
-      for (let offset = 0; offset < ready.length && picked.length < limit; offset++) {
-        const candidate = ready[(startIdx + offset) % ready.length];
-        if (!usedIds.has(candidate.id)) {
+        if (canPickDistinctOwner(candidate)) {
           addCandidate(candidate);
         }
       }
@@ -315,6 +346,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     elapsedActiveMsRef.current = 0;
     cycleDurationSecRef.current = schedule.cycleDurationSec;
     openAtMsByIdRef.current = schedule.openAtMsById;
+    dwellSecByIdRef.current = schedule.dwellSecById;
     userSelectedTabInBatchRef.current = false;
     lastAutoFocusedIdRef.current = batchIds[0] ?? null;
 
@@ -341,6 +373,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       setActiveBatchIds([]);
       setOpenAtMsById({});
       openAtMsByIdRef.current = {};
+      dwellSecByIdRef.current = {};
       setFocusedSlotId(null);
       setSlotStates({});
       setIsProcessingBatch(false);
@@ -348,8 +381,8 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       setIsExpanded(false);
       elapsedActiveMsRef.current = 0;
       setElapsedActiveMs(0);
-      cycleDurationSecRef.current = SINGLE_DWELL_MIN_SEC;
-      setCycleDurationSec(SINGLE_DWELL_MIN_SEC);
+      cycleDurationSecRef.current = DWELL_MIN_SEC;
+      setCycleDurationSec(DWELL_MIN_SEC);
       completingCycleRef.current = false;
       return;
     }
@@ -370,16 +403,23 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, sessionNonce, initialLinkId]);
 
-  // Adjust active concurrent slots cleanly when switching Single <-> Multi (5) or when links list changes
+  // Adjust active slots when switching Single <-> Multi (5) or when links list changes (strict 1 owner per slot)
   useEffect(() => {
     if (!isOpen || completingCycleRef.current) return;
 
     const currentNow = Date.now();
     const prev = activeBatchIdsRef.current;
-    const valid = prev.filter((id) => {
+    const seenOwners = new Set<string>();
+    const valid: string[] = [];
+
+    for (const id of prev) {
       const item = linksById.get(id);
-      return Boolean(item) && getEffectiveCooldownEnd(item!) <= currentNow;
-    });
+      if (!item || getEffectiveCooldownEnd(item) > currentNow) continue;
+      const ownerKey = getItemOwnerKey(item);
+      if (seenOwners.has(ownerKey)) continue;
+      seenOwners.add(ownerKey);
+      valid.push(id);
+    }
 
     if (valid.length === 0) {
       const nextBatch = pickNextBatch(null, concurrencyLimit, preferredBatchIdsRef.current);
@@ -389,8 +429,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
     }
 
     if (valid.length > concurrencyLimit) {
-      const sliced = valid.slice(0, concurrencyLimit);
-      initializeBatchSchedule(sliced);
+      initializeBatchSchedule(valid.slice(0, concurrencyLimit));
       return;
     }
 
@@ -400,26 +439,27 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       const extras: string[] = [];
       const needed = concurrencyLimit - valid.length;
 
+      const tryAddExtra = (candidate?: AutoVisitQueueItem) => {
+        if (!candidate || extras.length >= needed) return;
+        if (used.has(candidate.id)) return;
+        const ownerKey = getItemOwnerKey(candidate);
+        if (seenOwners.has(ownerKey)) return;
+        seenOwners.add(ownerKey);
+        used.add(candidate.id);
+        extras.push(candidate.id);
+      };
+
       if (preferredBatchIdsRef.current && preferredBatchIdsRef.current.length > 0) {
         for (const prefId of preferredBatchIdsRef.current) {
           if (extras.length >= needed) break;
-          if (used.has(prefId)) continue;
-          const match = ready.find((item) => item.id === prefId);
-          if (match) {
-            extras.push(match.id);
-            used.add(match.id);
-          }
+          tryAddExtra(ready.find((item) => item.id === prefId));
         }
       }
 
       if (extras.length < needed && ready.length > 0) {
         const startIdx = cursorRef.current % ready.length;
         for (let offset = 0; offset < ready.length && extras.length < needed; offset++) {
-          const candidate = ready[(startIdx + offset) % ready.length];
-          if (!used.has(candidate.id)) {
-            extras.push(candidate.id);
-            used.add(candidate.id);
-          }
+          tryAddExtra(ready[(startIdx + offset) % ready.length]);
         }
       }
 
@@ -435,14 +475,24 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         }
         let cursorMs = Math.max(elapsedActiveMsRef.current, maxScheduled);
         for (const extraId of extras) {
-          cursorMs += randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
+          let gapMs = randomInt(STAGGER_MIN_MS, STAGGER_MAX_MS);
+          if (Math.abs(gapMs - 5000) < 250) {
+            gapMs = randomInt(5700, STAGGER_MAX_MS);
+          }
+          cursorMs += gapMs;
           nextOpenAt[extraId] = cursorMs;
         }
         const nextTotalSec = Math.max(
           cycleDurationSecRef.current,
-          Math.ceil(cursorMs / 1000) + randomInt(POST_LAST_OPEN_MIN_SEC, POST_LAST_OPEN_MAX_SEC)
+          Math.ceil(cursorMs / 1000) + randomInt(DWELL_MIN_SEC, DWELL_MAX_SEC)
         );
+        const nextDwellById = { ...dwellSecByIdRef.current };
+        for (const id of combined) {
+          const openSec = Math.floor((nextOpenAt[id] ?? 0) / 1000);
+          nextDwellById[id] = Math.max(DWELL_MIN_SEC, nextTotalSec - openSec);
+        }
         openAtMsByIdRef.current = nextOpenAt;
+        dwellSecByIdRef.current = nextDwellById;
         cycleDurationSecRef.current = nextTotalSec;
         setOpenAtMsById(nextOpenAt);
         setCycleDurationSec(nextTotalSec);
@@ -483,6 +533,20 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
         .filter((item): item is AutoVisitQueueItem => Boolean(item)),
     [activeBatchIds, linksById]
   );
+
+  const readyDistinctOwnersCount = useMemo(() => {
+    const owners = new Set<string>();
+    for (const item of links) {
+      const cooldownEnd = Math.max(
+        cooldowns[item.id] ?? 0,
+        localHoldUntilRef.current[item.id] ?? 0
+      );
+      if (cooldownEnd <= nowMs) {
+        owners.add(getItemOwnerKey(item));
+      }
+    }
+    return owners.size;
+  }, [cooldowns, links, nowMs]);
 
   const queueCooldownMetrics = useMemo(() => {
     let readyCount = 0;
@@ -538,9 +602,12 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
 
           const results = await Promise.all(
             batchSlice.map(async (item) => {
-              const cooldownMs = Math.max(30, item.cooldownSec || 60) * 1000;
+              const safeCooldownSec = clampSafeCooldownSec(item.cooldownSec);
+              const cooldownMs = safeCooldownSec * 1000;
+              const actualDwellSec =
+                dwellSecByIdRef.current[item.id] ?? randomInt(DWELL_MIN_SEC, DWELL_MAX_SEC);
               try {
-                await onCompleteLinkVisitRef.current(item);
+                await onCompleteLinkVisitRef.current(item, actualDwellSec);
                 localHoldUntilRef.current[item.id] = Date.now() + cooldownMs;
                 if (sessionTokenRef.current === activeSessionToken) {
                   setSlotStates((prev) => ({ ...prev, [item.id]: 'done' }));
@@ -607,7 +674,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
   const executeConcurrentBatchRef = useRef(executeConcurrentBatch);
   executeConcurrentBatchRef.current = executeConcurrentBatch;
 
-  // High-precision active timer (250ms tick) that drives staggered 4–7.5s openings & random cycle end
+  // High-precision active timer (250ms tick) driving randomized staggered openings & 20-35s dwell time
   useEffect(() => {
     if (!isOpen || isPaused || isProcessingBatch || activeItems.length === 0) return;
 
@@ -625,7 +692,6 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
       elapsedActiveMsRef.current = nextElapsed;
       setElapsedActiveMs(nextElapsed);
 
-      // Unlock staggered slots as their randomized delay arrives
       const schedule = openAtMsByIdRef.current;
       let newlyOpenedId: string | null = null;
 
@@ -801,7 +867,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               <div className="flex items-center gap-1.5 text-xs font-bold text-white">
                 <span className="truncate">
                   {isMultiRunning
-                    ? `Multi (5) · ${openedCount}/${activeItems.length} Open`
+                    ? `Multi (5) · ${openedCount}/${activeItems.length} Owners`
                     : 'In-App Browser Visit'}
                 </span>
                 {activeItems.length > 0 && (
@@ -812,10 +878,10 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               </div>
               <p className="font-mono-num truncate text-[11px] text-slate-300">
                 {activeItems.length > 0
-                  ? `${focusedItem?.domain || focusedItem?.title || ''} · Ready ${queueCooldownMetrics.readyCount} · Done ${completedCount}`
+                  ? `${focusedItem?.domain || focusedItem?.title || ''} · ${readyDistinctOwnersCount} owners ready · Done ${completedCount}`
                   : links.length === 0
                     ? 'No links in queue'
-                    : `Cooldown ${queueCooldownMetrics.shortestCooldownSec}s · ${queueCooldownMetrics.coolingCount} waiting`}
+                    : `Cooldown ${formatCooldownDuration(queueCooldownMetrics.shortestCooldownSec)} · ${queueCooldownMetrics.coolingCount} waiting`}
               </p>
             </div>
           </div>
@@ -910,7 +976,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
           </div>
         </div>
 
-        {/* Full-Height In-App Browser Viewer (opened slots run staggered 4-7.5s apart inside real spacious viewports) */}
+        {/* Full-Height In-App Browser Viewer */}
         {activeItems.length > 0 ? (
           <div
             className={
@@ -919,7 +985,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                 : 'pointer-events-none h-0 overflow-hidden opacity-0'
             }
           >
-            {/* Tab Strip for Multi (5) Staggered In-App Tabs */}
+            {/* Tab Strip for Multi (5) Distinct-Owner Staggered Tabs */}
             <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 bg-[#050817]/95 px-2.5 py-1.5">
               {activeItems.map((item, idx) => {
                 const openAtMs = openAtMsById[item.id] ?? 0;
@@ -936,7 +1002,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                       userSelectedTabInBatchRef.current = true;
                       setFocusedSlotId(item.id);
                     }}
-                    className={`flex max-w-[170px] shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors ${
+                    className={`flex max-w-[180px] shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors ${
                       isFocused
                         ? 'border-[#00F5FF]/60 bg-[#00F5FF]/15 font-bold text-white'
                         : isOpened
@@ -961,7 +1027,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                     </span>
                     {!isOpened && (
                       <span className="font-mono-num shrink-0 text-[9px] text-amber-300">
-                        {waitSec}s
+                        +{waitSec}s
                       </span>
                     )}
                     {status === 'done' && (
@@ -985,7 +1051,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               )}
             </div>
 
-            {/* Spacious Real In-App Viewport Stage (never tiny 80px frames; all opened tabs keep full visible dimensions) */}
+            {/* Spacious Real In-App Viewport Stage */}
             <div
               className={`relative w-full bg-white ${
                 isExpanded
@@ -1011,7 +1077,8 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
                         Opening {item.domain || item.title} in {waitSec}s...
                       </p>
                       <p className="max-w-xs text-[11px] text-slate-400">
-                        Staggered human-paced delay (4–7.5s) prevents burst traffic spikes.
+                        Randomized human delay (3.8–8.6s) · Unique publisher:{' '}
+                        {item.managedLink?.ownerName || 'Member'}
                       </p>
                     </div>
                   );
@@ -1033,16 +1100,26 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               })}
             </div>
 
-            {/* Subtle Safety Footer */}
-            <div className="flex shrink-0 items-center justify-between gap-2 border-t border-white/10 bg-[#050817] px-3 py-1.5 text-[10px] text-slate-400">
-              <span className="flex items-center gap-1 truncate">
+            {/* Anti-Ban Safety Footer */}
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 bg-[#050817] px-3 py-1.5 text-[10px] text-slate-400">
+              <span className="flex items-center gap-1.5 truncate">
                 <ShieldCheck className="h-3 w-3 shrink-0 text-[#00FF87]" />
                 <span className="truncate">
-                  Human-paced {cycleDurationSec}s cycle · Staggered 4–7.5s · No-Referrer
+                  Dwell 20–35s · Random Delay · 12–24h Cooldown
+                  {focusedItem?.targetGeos && focusedItem.targetGeos.length > 0
+                    ? ` · GEO: ${focusedItem.targetGeos.slice(0, 4).join('/')}`
+                    : ''}
+                  {visitorGeoCode && visitorGeoCode !== 'XX' ? ` (You: ${visitorGeoCode})` : ''}
                 </span>
               </span>
-              <span className="font-mono-num shrink-0 text-slate-300">
-                {isPaused ? 'Paused' : `${remainingSec}s left`}
+              <span className="font-mono-num flex shrink-0 items-center gap-2 text-slate-300">
+                {isMultiRunning && (
+                  <span className="flex items-center gap-1 text-[#FF9AD0]">
+                    <Users className="h-3 w-3" />
+                    {activeItems.length}/5 Owners
+                  </span>
+                )}
+                <span>{isPaused ? 'Paused' : `${remainingSec}s left`}</span>
               </span>
             </div>
           </div>
@@ -1053,7 +1130,7 @@ export const BottomVisitDock: React.FC<BottomVisitDockProps> = ({
               <span>
                 {links.length === 0
                   ? "Listening for other members' links · auto-starts when a new member publishes."
-                  : `All ${queueCooldownMetrics.coolingCount} links on cooldown · resuming in ${queueCooldownMetrics.shortestCooldownSec}s`}
+                  : `All ${queueCooldownMetrics.coolingCount} links on 12–24h cooldown · next ready in ${formatCooldownDuration(queueCooldownMetrics.shortestCooldownSec)}`}
               </span>
             </span>
           </div>

@@ -16,12 +16,14 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
-import { checkDuplicateUrlKey } from '../services/linkService';
+import { checkDuplicateUrlKey, formatCooldownDuration } from '../services/linkService';
 import {
+  DEFAULT_TIER1_TARGET_GEOS,
   LINK_CATEGORIES,
   LinkStatus,
   LinkVisitRecord,
   ManagedLink,
+  TARGET_GEO_OPTIONS,
   VisitTab,
 } from '../types';
 import { computeUrlKey, validateAndNormalizeUrl } from '../utils/urlValidator';
@@ -38,6 +40,7 @@ interface LinkManagerScreenProps {
     description: string;
     rawUrl: string;
     category: string;
+    targetGeos?: string[];
   }) => Promise<void>;
   onUpdateLink: (
     existingLink: ManagedLink,
@@ -47,6 +50,7 @@ interface LinkManagerScreenProps {
       description: string;
       rawUrl: string;
       category: string;
+      targetGeos?: string[];
     }
   ) => Promise<void>;
   onDeleteLink: (link: ManagedLink) => Promise<void>;
@@ -88,6 +92,7 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
   const [rawUrl, setRawUrl] = useState('');
   const [category, setCategory] = useState<string>(LINK_CATEGORIES[0]);
   const [description, setDescription] = useState('');
+  const [targetGeos, setTargetGeos] = useState<string[]>(DEFAULT_TIER1_TARGET_GEOS);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -145,6 +150,7 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
     setRawUrl('');
     setCategory(LINK_CATEGORIES[0]);
     setDescription('');
+    setTargetGeos(DEFAULT_TIER1_TARGET_GEOS);
     setFormError(null);
   };
 
@@ -155,9 +161,22 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
     setRawUrl(link.url);
     setCategory(link.category);
     setDescription(link.description);
+    setTargetGeos(
+      link.targetGeos && link.targetGeos.length > 0 ? link.targetGeos : DEFAULT_TIER1_TARGET_GEOS
+    );
     setFormError(null);
     setFormSuccess(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const toggleTargetGeo = (code: string) => {
+    setTargetGeos((prev) => {
+      if (prev.includes(code)) {
+        if (prev.length <= 1) return prev;
+        return prev.filter((item) => item !== code);
+      }
+      return [...prev, code].slice(0, 8);
+    });
   };
 
   const handleUpgradeHttps = () => {
@@ -191,6 +210,7 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
           description,
           rawUrl,
           category,
+          targetGeos,
         });
         setFormSuccess(
           linkType === 'smartlink'
@@ -204,6 +224,7 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
           description,
           rawUrl,
           category,
+          targetGeos,
         });
         setFormSuccess(
           linkType === 'smartlink'
@@ -469,10 +490,40 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
             />
           </div>
 
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="text-xs font-medium text-slate-300">
+                Preferred High-CPM GEOs (Adsterra Tier-1 Priority)
+              </label>
+              <span className="text-[11px] text-cyan-300">
+                12–24h randomized cooldown · 20–35s human dwell
+              </span>
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {TARGET_GEO_OPTIONS.map((geo) => {
+                const selected = targetGeos.includes(geo.code);
+                return (
+                  <button
+                    key={geo.code}
+                    type="button"
+                    onClick={() => toggleTargetGeo(geo.code)}
+                    className={`min-h-[34px] rounded-xl border px-2.5 py-1 text-xs font-semibold transition-all ${
+                      selected
+                        ? 'border-[#00FF87]/55 bg-[#00FF87]/15 text-[#00FF87]'
+                        : 'border-white/12 bg-slate-950/60 text-slate-400 hover:border-white/25 hover:text-white'
+                    }`}
+                  >
+                    {geo.flag} {geo.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <p className="text-[11px] text-slate-400">
               {linkType === 'smartlink'
-                ? 'Smartlinks go live immediately (no admin approval required). Duplicate or unsafe URLs are blocked.'
+                ? 'Smartlinks go live immediately with 12–24h safe cooldown & distinct-owner Multi-5 rotation.'
                 : 'Websites require Admin Approval. Malicious, duplicate, or deceptive URLs are blocked.'}
             </p>
             <button
@@ -597,6 +648,10 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
                           {' · '}
                           <span className="text-[#00F5FF]">{link.category}</span>
                           {link.isHttps ? ' · HTTPS' : ''}
+                          {' · '}
+                          <span className="text-purple-200">
+                            Cooldown {formatCooldownDuration(link.cooldownSec)}
+                          </span>
                         </p>
 
                         <h3 className="font-display mt-2 text-base font-bold text-white">
@@ -605,6 +660,18 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
                         <p className="mt-1 text-xs leading-relaxed text-slate-300">
                           {link.description}
                         </p>
+                        {link.targetGeos && link.targetGeos.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            {link.targetGeos.map((geo) => (
+                              <span
+                                key={geo}
+                                className="rounded-md border border-[#00FF87]/25 bg-[#00FF87]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#00FF87]"
+                              >
+                                {geo}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                         <p className="mt-1.5 flex items-center gap-1.5 truncate text-xs text-slate-400">
                           <ExternalLink className="h-3.5 w-3.5 shrink-0 text-[#00F5FF]" />
                           <span className="truncate">{link.url}</span>
@@ -695,7 +762,7 @@ export const LinkManagerScreen: React.FC<LinkManagerScreenProps> = ({
                     {remaining > 0 ? (
                       <span className="font-mono-num flex items-center gap-1.5 rounded-lg border border-purple-400/30 bg-purple-500/15 px-2.5 py-1 text-xs font-medium text-purple-200">
                         <Clock className="h-3.5 w-3.5" />
-                        <span>Cooldown {remaining}s</span>
+                        <span>Cooldown {formatCooldownDuration(remaining)}</span>
                       </span>
                     ) : (
                       <span className="flex items-center gap-1 text-xs text-slate-400">

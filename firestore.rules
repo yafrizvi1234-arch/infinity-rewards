@@ -275,6 +275,7 @@ service cloud.firestore {
           'category',
           'status',
           'cooldownSec',
+          'targetGeos',
           'reportCount',
           'moderationNote',
           'moderatedBy',
@@ -297,7 +298,8 @@ service cloud.firestore {
         && data.isHttps is bool
         && data.category is string && data.category.size() >= 2 && data.category.size() <= 40
         && data.status is string && data.status in ['pending', 'approved', 'rejected']
-        && data.cooldownSec is int && data.cooldownSec >= 30 && data.cooldownSec <= 300
+        && data.cooldownSec is int && data.cooldownSec >= 30 && data.cooldownSec <= 86400
+        && (!('targetGeos' in data) || (data.targetGeos is list && data.targetGeos.size() >= 1 && data.targetGeos.size() <= 8 && data.targetGeos[0] is string && data.targetGeos[0].size() >= 2 && data.targetGeos[0].size() <= 10))
         && data.reportCount is int && data.reportCount >= 0 && data.reportCount <= 10000
         && (!('moderationNote' in data) || (data.moderationNote is string && data.moderationNote.size() <= 240))
         && (!('moderatedBy' in data) || (data.moderatedBy is string && data.moderatedBy.size() <= 128))
@@ -878,6 +880,8 @@ service cloud.firestore {
           (incoming().type == 'smartlink' && incoming().status == 'approved')
           || (incoming().type == 'website' && incoming().status == 'pending')
         )
+        && incoming().cooldownSec >= 43200
+        && incoming().cooldownSec <= 86400
         && incoming().reportCount == 0
         && !('moderationNote' in incoming())
         && !('moderatedBy' in incoming())
@@ -915,6 +919,7 @@ service cloud.firestore {
               'isHttps',
               'category',
               'cooldownSec',
+              'targetGeos',
               'reportCount',
               'status',
               'moderationNote',
@@ -938,6 +943,7 @@ service cloud.firestore {
               'isHttps',
               'category',
               'cooldownSec',
+              'targetGeos',
               'reportCount',
               'status',
               'moderationNote',
@@ -971,6 +977,7 @@ service cloud.firestore {
               'isHttps',
               'category',
               'cooldownSec',
+              'targetGeos',
               'reportCount',
               'status',
               'createdAt',
@@ -991,6 +998,7 @@ service cloud.firestore {
               'isHttps',
               'category',
               'cooldownSec',
+              'targetGeos',
               'status',
               'createdAt',
               'updatedAt'

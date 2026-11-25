@@ -28,6 +28,7 @@ import {
   AdsterraMetricTotals,
   AdsterraStatRow,
   ManagedLink,
+  TARGET_GEO_OPTIONS,
   UserPersonalSmartlink,
 } from '../types';
 import { validateAndNormalizeUrl } from '../utils/urlValidator';
@@ -95,10 +96,37 @@ function formatUsd(val: number, decimals = 4): string {
 }
 
 function countryCodeToFlag(code: string): string {
-  const clean = code.trim().toUpperCase();
+  const clean = normalizeGeoIsoFilter(code);
   if (!/^[A-Z]{2}$/.test(clean)) return '';
   return String.fromCodePoint(...[...clean].map((ch) => 127397 + ch.charCodeAt(0)));
 }
+
+function normalizeGeoIsoFilter(raw: string): string {
+  const upper = raw.trim().toUpperCase();
+  if (!upper) return '';
+  if (upper === 'UK') return 'GB';
+  if (upper === 'UAE') return 'AE';
+  if (upper === 'USA') return 'US';
+  if (upper === 'AUS') return 'AU';
+  if (upper === 'CAN') return 'CA';
+  return upper.slice(0, 2);
+}
+
+function formatGeoRowLabel(raw: string): string {
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'GB') return 'GB (UK)';
+  if (upper === 'AE') return 'AE (UAE)';
+  return raw;
+}
+
+const KEY_HIGH_CPM_GEOS = [
+  { iso: 'US', label: 'US', flag: '🇺🇸' },
+  { iso: 'GB', label: 'UK (GB)', flag: '🇬🇧' },
+  { iso: 'AE', label: 'UAE (AE)', flag: '🇦🇪' },
+  { iso: 'AU', label: 'AU', flag: '🇦🇺' },
+  { iso: 'UA', label: 'UA', flag: '🇺🇦' },
+  { iso: 'CA', label: 'CA', flag: '🇨🇦' },
+] as const;
 
 function utcYmd(offsetDays = 0): string {
   return new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -344,13 +372,16 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
     setStatsError(null);
     setLoadingStats(true);
     try {
+      const rawCountry =
+        overrides && 'country' in overrides ? overrides.country ?? '' : filterCountry;
+      const normalizedCountry = normalizeGeoIsoFilter(rawCountry);
       await onFetchStats({
         preset: nextPreset,
         startDate: overrides?.startDate ?? (nextPreset === 'custom' ? customStart : undefined),
         finishDate: overrides?.finishDate ?? (nextPreset === 'custom' ? customFinish : undefined),
         domainId: (overrides?.domainId ?? filterDomainId) || undefined,
         placementId: (overrides?.placementId ?? filterPlacementId) || undefined,
-        country: (overrides?.country ?? filterCountry) || undefined,
+        country: normalizedCountry || undefined,
       });
     } catch (err) {
       setStatsError(err instanceof Error ? err.message : 'Failed to load Adsterra stats.');
@@ -812,14 +843,14 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             <div className="lg:col-span-2">
               <label className="mb-1 flex items-center gap-1 text-[11px] text-slate-400">
                 <Filter className="h-3 w-3 text-[#FF2E93]" />
-                <span>GEO (ISO)</span>
+                <span>GEO (US, UK, UAE, UA)</span>
               </label>
               <input
                 type="text"
-                maxLength={2}
+                maxLength={3}
                 value={filterCountry}
                 onChange={(e) => setFilterCountry(e.target.value.toUpperCase())}
-                placeholder="e.g. US, BD"
+                placeholder="US, UK, UAE, UA"
                 className="font-mono-num min-h-[38px] w-full rounded-xl border border-white/15 bg-[#070B20] px-2.5 text-xs uppercase text-white placeholder:normal-case placeholder:text-slate-500 focus:border-[#FF2E93] focus:outline-none"
               />
             </div>
@@ -834,6 +865,47 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
                 <RefreshCw className={`h-3.5 w-3.5 ${loadingStats ? 'animate-spin' : ''}`} />
                 <span>{loadingStats ? 'Loading...' : 'Apply Filter'}</span>
               </button>
+            </div>
+
+            {/* Quick Tier-1 / Target GEO Filter Buttons */}
+            <div className="flex flex-wrap items-center gap-1.5 border-t border-white/10 pt-2.5 sm:col-span-2 lg:col-span-12">
+              <span className="mr-1 text-[11px] font-semibold text-slate-400">Quick GEO:</span>
+              <button
+                type="button"
+                disabled={loadingStats}
+                onClick={() => {
+                  setFilterCountry('');
+                  void runStatsQuery(preset, { country: '' });
+                }}
+                className={`min-h-[30px] rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all ${
+                  !filterCountry.trim()
+                    ? 'border-[#00F5FF]/55 bg-[#00F5FF]/15 text-[#00F5FF]'
+                    : 'border-white/10 bg-[#070B20] text-slate-300 hover:border-white/25'
+                }`}
+              >
+                All GEO
+              </button>
+              {TARGET_GEO_OPTIONS.filter((g) => g.iso !== 'GLOBAL').map((geo) => {
+                const active = normalizeGeoIsoFilter(filterCountry) === geo.iso;
+                return (
+                  <button
+                    key={geo.code}
+                    type="button"
+                    disabled={loadingStats}
+                    onClick={() => {
+                      setFilterCountry(geo.iso);
+                      void runStatsQuery(preset, { country: geo.iso });
+                    }}
+                    className={`min-h-[30px] rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all ${
+                      active
+                        ? 'border-[#00FF87]/55 bg-[#00FF87]/15 text-[#00FF87]'
+                        : 'border-white/10 bg-[#070B20] text-slate-300 hover:border-white/25'
+                    }`}
+                  >
+                    {geo.flag} {geo.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -1008,6 +1080,53 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
             </div>
           )}
 
+          {/* Tier-1 / Target GEO Performance Strip (US · UK · UAE · AU · UA · CA) */}
+          <div className="rounded-2xl border border-[#00FF87]/20 bg-[#050817]/75 p-3.5 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-display font-bold text-[#00FF87]">
+                High-CPM GEO Breakdown (US · UK · UAE · AU · UA · CA)
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Tap any country to filter · Real Adsterra GEO traffic
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+              {KEY_HIGH_CPM_GEOS.map((geo) => {
+                const row = (detailedStats?.byCountry ?? []).find(
+                  (r) => r.key.trim().toUpperCase() === geo.iso
+                );
+                const selected = normalizeGeoIsoFilter(filterCountry) === geo.iso;
+                return (
+                  <button
+                    key={geo.iso}
+                    type="button"
+                    disabled={loadingStats}
+                    onClick={() => {
+                      const next = selected ? '' : geo.iso;
+                      setFilterCountry(next);
+                      void runStatsQuery(preset, { country: next });
+                    }}
+                    className={`rounded-xl border px-3 py-2 text-left transition-all ${
+                      selected
+                        ? 'border-[#00FF87]/60 bg-[#00FF87]/15'
+                        : 'border-white/10 bg-[#070B20]/80 hover:border-[#00F5FF]/40'
+                    }`}
+                  >
+                    <p className="text-xs font-bold text-white">
+                      {geo.flag} {geo.label}
+                    </p>
+                    <p className="font-mono-num mt-1 text-sm font-extrabold text-[#00FF87]">
+                      {row ? formatUsd(row.revenue) : '$0.0000'}
+                    </p>
+                    <p className="font-mono-num text-[10px] text-cyan-300">
+                      CPM {row ? formatUsd(row.cpm, 2) : '$0.00'} · {row ? row.impressions : 0} impr
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Breakdown Tabs: Date / Placements / Domains / Countries / Inventory */}
           <div className="space-y-3">
             <div className="flex flex-wrap gap-1.5 rounded-2xl border border-[#B84DFF]/25 bg-[#050817]/80 p-1.5">
@@ -1136,7 +1255,7 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
                           <td className="px-4 py-3">
                             <p className="font-semibold text-white">
                               {flag ? `${flag} ` : ''}
-                              {row.label}
+                              {breakdownTab === 'country' ? formatGeoRowLabel(row.label) : row.label}
                             </p>
                             {row.sublabel && (
                               <p className="text-[11px] text-slate-400">{row.sublabel}</p>
@@ -1323,8 +1442,8 @@ export const AdsterraScreen: React.FC<AdsterraScreenProps> = ({
         </div>
 
         <div className="rounded-2xl border border-[#00FF87]/30 bg-[#00FF87]/8 px-4 py-2.5 text-xs text-slate-200">
-          <span className="font-bold text-[#00FF87]">Auto-Publish &amp; Persistent Mode:</span>{' '}
-          Smartlinks synced from your Adsterra API or linked below are automatically published live inside the app for all other members—and remain saved and live even if you disconnect the API.
+          <span className="font-bold text-[#00FF87]">Auto-Publish &amp; High-CPM Protection:</span>{' '}
+          Smartlinks target <span className="font-semibold text-white">US / UK / UAE / AU / UA</span>, enforce <span className="font-semibold text-[#00F5FF]">12–24h cooldowns</span>, <span className="font-semibold text-[#00FF87]">20–35s human dwell</span>, randomized delays, and <span className="font-semibold text-[#FF9AD0]">5 distinct owners per Multi (5) batch</span>—and remain saved even if the API disconnects.
         </div>
 
         {/* Ready Smartlinks List */}
