@@ -10,7 +10,10 @@ export const createPool = () => {
   if (!global._postgresPool) {
     const sqlHost = process.env.SQL_HOST;
     const isUnixSocket = Boolean(sqlHost && sqlHost.startsWith('/'));
-    const useRemoteSsl = Boolean(sqlHost && !isUnixSocket && process.env.SQL_SSL !== 'false');
+    const isExternalTcpHost = Boolean(sqlHost && !isUnixSocket && sqlHost.includes('.'));
+    const useRemoteSsl =
+      process.env.SQL_SSL === 'true' ||
+      (isExternalTcpHost && process.env.SQL_SSL !== 'false');
 
     global._postgresPool = new Pool({
       host: sqlHost,

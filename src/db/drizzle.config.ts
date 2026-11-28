@@ -22,6 +22,10 @@ if (!password) {
 }
 
 const isUnixSocket = sqlHost.startsWith('/');
+const isExternalTcpHost = !isUnixSocket && sqlHost.includes('.');
+const useRemoteSsl =
+  process.env.SQL_SSL === 'true' ||
+  (isExternalTcpHost && process.env.SQL_SSL !== 'false');
 
 export default defineConfig({
   schema: './src/db/schema.ts',
@@ -33,7 +37,7 @@ export default defineConfig({
     user,
     password,
     database: sqlDbName,
-    ssl: isUnixSocket || process.env.SQL_SSL === 'false' ? false : { rejectUnauthorized: false },
+    ssl: useRemoteSsl ? { rejectUnauthorized: false } : false,
   },
   verbose: true,
 });
