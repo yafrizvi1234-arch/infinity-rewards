@@ -10,7 +10,7 @@ export interface AvatarUploadResult {
 const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/x-png', 'image/webp'];
 const ALLOWED_EXT_PATTERN = /\.(jpe?g|png|webp)$/i;
 const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5MB
-const STORAGE_UPLOAD_TIMEOUT_MS = 6000;
+const STORAGE_UPLOAD_TIMEOUT_MS = 2500;
 const MAX_AVATAR_FALLBACK_CHARS = 130000;
 const MAX_SCREENSHOT_FALLBACK_CHARS = 230000;
 
@@ -172,22 +172,18 @@ export async function uploadProfileAvatar(uid: string, file: File): Promise<Avat
     return {
       photoURL: downloadUrl,
       storageMethod: 'firebase_storage',
-      note: 'Profile picture uploaded to Firebase Storage.',
+      note: 'Profile picture uploaded.',
     };
-  } catch (err) {
-    console.warn(
-      'Firebase Storage unavailable or unauthorized, using compressed profile image fallback:',
-      err
-    );
+  } catch {
     if (dataUrl.length > MAX_AVATAR_FALLBACK_CHARS + 5000) {
       throw new Error(
-        'Firebase Storage is not enabled and the compressed image exceeded Firestore limits. Please try a simpler image.'
+        'Compressed image exceeded size limits. Please try a simpler image.'
       );
     }
     return {
       photoURL: dataUrl,
       storageMethod: 'compressed_fallback',
-      note: 'Firebase Storage is not active yet — saved compressed avatar directly to your profile.',
+      note: 'Saved compressed avatar directly to your profile.',
     };
   }
 }

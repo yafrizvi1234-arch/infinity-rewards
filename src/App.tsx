@@ -1674,7 +1674,7 @@ export default function App() {
         avatar: saved.photoURL,
       },
     }));
-    setToastMessage('Profile saved to Firestore');
+    setToastMessage('Profile saved to cloud workspace');
   };
 
   const handleResetUiPrefs = () => {

@@ -1,30 +1,18 @@
+import { auth } from '../firebase';
 import {
-  Timestamp,
-  collection,
-  doc,
-  getDoc,
-  limit,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  setDoc,
-  where,
-  writeBatch,
-} from 'firebase/firestore';
-import {
-  OperationType,
-  auth,
-  db,
-  handleFirestoreError,
-  reportFirestoreListenerError,
-} from '../firebase';
-import {
+  LinkReportRecord,
+  ManagedLink,
+  ModerationLogRecord,
   MultiEntitlementRecord,
   PaymentMethod,
   PaymentNumbersConfig,
   PaymentRequestRecord,
-  PaymentStatus,
 } from '../types';
+import {
+  apiRequest,
+  createPollingSubscription,
+  emitSyncTopics,
+} from './apiClient';
 import { assertVerifiedAdminSession } from './linkService';
 import { uploadPaymentScreenshot } from './storageService';
 
@@ -75,18 +63,6 @@ export const PAYMENT_CHANNELS: Record<PaymentMethod, PaymentChannelConfig> = {
   },
 };
 
-function timestampToMs(val: unknown): number {
-  if (val instanceof Timestamp) return val.toMillis();
-  if (typeof val === 'object' && val !== null && 'toMillis' in val) {
-    try {
-      return Number((val as { toMillis: () => number }).toMillis());
-    } catch {
-      return Date.now();
-    }
-  }
-  return Date.now();
-}
-
 export function normalizeAndValidateTransactionId(raw: string): string {
   const normalized = raw.trim().toUpperCase();
   if (normalized.length < 6 || normalized.length > 40) {
@@ -115,40 +91,26 @@ export function validatePersonalPaymentNumber(raw: string, channelLabel: string)
 }
 
 export async function isTransactionIdAlreadyUsed(txKey: string): Promise<boolean> {
-  const path = `paymentTransactions/${txKey}`;
-  try {
-    const snap = await getDoc(doc(db, 'paymentTransactions', txKey));
-    return snap.exists();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
+  const res = await apiRequest<{ used: boolean }>(
+    `/api/payments/tx-check?txKey=${encodeURIComponent(txKey)}`,
+    { method: 'GET' }
+  );
+  return Boolean(res.used);
 }
 
 export function subscribePaymentNumbersConfig(
   onUpdate: (config: PaymentNumbersConfig) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const docPath = `paymentConfig/${MULTI5_PLAN_ID}`;
-  return onSnapshot(
-    doc(db, 'paymentConfig', MULTI5_PLAN_ID),
-    (snap) => {
-      if (!snap.exists()) {
-        onUpdate(DEFAULT_PAYMENT_NUMBERS);
-        return;
-      }
-      const data = snap.data();
-      onUpdate({
-        id: MULTI5_PLAN_ID,
-        bkashNumber: String(data.bkashNumber ?? DEFAULT_PAYMENT_NUMBERS.bkashNumber),
-        nagadNumber: String(data.nagadNumber ?? DEFAULT_PAYMENT_NUMBERS.nagadNumber),
-        updatedBy: data.updatedBy ? String(data.updatedBy) : undefined,
-        updatedByEmail: data.updatedByEmail ? String(data.updatedByEmail) : undefined,
-        updatedAtMs: data.updatedAt ? timestampToMs(data.updatedAt) : undefined,
-      });
+  return createPollingSubscription<PaymentNumbersConfig>(
+    'payments-config',
+    async () => {
+      const res = await apiRequest<{ config: PaymentNumbersConfig }>('/api/payments/config');
+      return res.config || DEFAULT_PAYMENT_NUMBERS;
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.GET, docPath, onError);
-    }
+    onUpdate,
+    onError,
+    30000
   );
 }
 
@@ -156,61 +118,20 @@ export async function updatePaymentNumbersConfigSecure(params: {
   bkashNumber: string;
   nagadNumber: string;
 }): Promise<PaymentNumbersConfig> {
-  const adminSession = await assertVerifiedAdminSession();
+  await assertVerifiedAdminSession();
   const bkashNumber = validatePersonalPaymentNumber(params.bkashNumber, 'bKash (Personal)');
   const nagadNumber = validatePersonalPaymentNumber(params.nagadNumber, 'Nagad (Personal)');
-  const docPath = `paymentConfig/${MULTI5_PLAN_ID}`;
 
-  try {
-    await setDoc(doc(db, 'paymentConfig', MULTI5_PLAN_ID), {
-      id: MULTI5_PLAN_ID,
+  const res = await apiRequest<{ config: PaymentNumbersConfig }>('/api/admin/payments/config', {
+    method: 'PUT',
+    body: {
       bkashNumber,
       nagadNumber,
-      updatedBy: adminSession.uid,
-      updatedByEmail: adminSession.email.slice(0, 120),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, docPath);
-  }
+    },
+  });
 
-  return {
-    id: MULTI5_PLAN_ID,
-    bkashNumber,
-    nagadNumber,
-    updatedBy: adminSession.uid,
-    updatedByEmail: adminSession.email,
-    updatedAtMs: Date.now(),
-  };
-}
-
-function mapPaymentRequest(id: string, data: Record<string, unknown>): PaymentRequestRecord {
-  const status: PaymentStatus =
-    data.status === 'approved' || data.status === 'rejected' || data.status === 'pending'
-      ? data.status
-      : 'pending';
-  const paymentMethod: PaymentMethod = data.paymentMethod === 'nagad' ? 'nagad' : 'bkash';
-
-  return {
-    id,
-    uid: String(data.uid ?? ''),
-    userName: String(data.userName ?? 'Member'),
-    userUsername: String(data.userUsername ?? '@member'),
-    planId: MULTI5_PLAN_ID,
-    amountBdt: Number(data.amountBdt ?? MULTI5_PRICE_BDT),
-    paymentMethod,
-    paymentNumber: String(data.paymentNumber ?? ''),
-    senderNumber: data.senderNumber ? String(data.senderNumber) : undefined,
-    transactionId: String(data.transactionId ?? ''),
-    screenshotUrl: String(data.screenshotUrl ?? ''),
-    status,
-    adminNote: data.adminNote ? String(data.adminNote) : undefined,
-    reviewedBy: data.reviewedBy ? String(data.reviewedBy) : undefined,
-    reviewedByEmail: data.reviewedByEmail ? String(data.reviewedByEmail) : undefined,
-    reviewedAtMs: data.reviewedAt ? timestampToMs(data.reviewedAt) : undefined,
-    createdAtMs: timestampToMs(data.createdAt),
-    updatedAtMs: timestampToMs(data.updatedAt),
-  };
+  emitSyncTopics('payments-config');
+  return res.config;
 }
 
 export async function submitMulti5PaymentRequest(params: {
@@ -247,44 +168,24 @@ export async function submitMulti5PaymentRequest(params: {
     );
   }
 
-  const requestRef = doc(collection(db, 'paymentRequests'));
-  const uploadResult = await uploadPaymentScreenshot(params.uid, requestRef.id, params.screenshotFile);
+  const tempReqId = `req_${Date.now()}`;
+  const uploadResult = await uploadPaymentScreenshot(params.uid, tempReqId, params.screenshotFile);
 
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'paymentTransactions', txKey), {
-    requestId: requestRef.id,
-    createdAt: serverTimestamp(),
+  const res = await apiRequest<{ id: string }>('/api/payments/request', {
+    method: 'POST',
+    body: {
+      userName: params.userName,
+      userUsername: params.userUsername,
+      paymentMethod: params.paymentMethod,
+      paymentNumber: receiverNumber,
+      senderNumber: cleanSender,
+      transactionId: txKey,
+      screenshotUrl: uploadResult.screenshotUrl,
+    },
   });
 
-  const payload: Record<string, unknown> = {
-    id: requestRef.id,
-    uid: params.uid,
-    userName: params.userName.trim().slice(0, 50) || 'Member',
-    userUsername: params.userUsername.trim().slice(0, 32) || '@member',
-    planId: MULTI5_PLAN_ID,
-    amountBdt: MULTI5_PRICE_BDT,
-    paymentMethod: params.paymentMethod,
-    paymentNumber: receiverNumber,
-    transactionId: txKey,
-    screenshotUrl: uploadResult.screenshotUrl,
-    status: 'pending',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-
-  if (cleanSender) {
-    payload.senderNumber = cleanSender;
-  }
-
-  batch.set(requestRef, payload);
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `paymentRequests/${requestRef.id}`);
-  }
-
-  return requestRef.id;
+  emitSyncTopics('payments-me', 'admin-overview');
+  return res.id;
 }
 
 export async function reviewPaymentRequestSecure(params: {
@@ -293,157 +194,71 @@ export async function reviewPaymentRequestSecure(params: {
   adminNote?: string;
   verifiedProof?: boolean;
 }): Promise<void> {
-  const adminSession = await assertVerifiedAdminSession();
-  const { request: paymentReq, decision, adminNote, verifiedProof } = params;
-
-  if (paymentReq.status !== 'pending') {
-    throw new Error('Only pending payment requests can be reviewed.');
-  }
-
-  if (decision === 'approved') {
-    if (!verifiedProof) {
-      throw new Error(
-        'Please verify the Transaction ID and Payment Screenshot before approving Multi (5).'
-      );
-    }
-    if (!paymentReq.transactionId || !paymentReq.screenshotUrl || paymentReq.amountBdt !== MULTI5_PRICE_BDT) {
-      throw new Error('Incomplete payment proof: cannot approve without valid 50 BDT proof.');
-    }
-    const existingEntitlement = await getDoc(doc(db, 'multiEntitlements', paymentReq.uid));
-    if (existingEntitlement.exists()) {
-      throw new Error(
-        'Multi (5) is already active for this applicant. Please reject duplicate requests instead.'
-      );
-    }
-  }
-
-  const cleanNote = (adminNote ?? '').trim().slice(0, 240);
-  const batch = writeBatch(db);
-
-  batch.update(doc(db, 'paymentRequests', paymentReq.id), {
-    status: decision,
-    adminNote:
-      cleanNote ||
-      (decision === 'approved'
-        ? 'Payment verified — Multi (5) activated for applicant account.'
-        : 'Payment proof could not be verified.'),
-    reviewedBy: adminSession.uid,
-    reviewedByEmail: adminSession.email.slice(0, 120),
-    reviewedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+  await assertVerifiedAdminSession();
+  await apiRequest(`/api/admin/payments/${encodeURIComponent(params.request.id)}/review`, {
+    method: 'POST',
+    body: {
+      decision: params.decision,
+      adminNote: params.adminNote,
+      verifiedProof: Boolean(params.verifiedProof),
+    },
   });
 
-  if (decision === 'approved') {
-    // Strictly activate Multi (5) ONLY for the applicant's own UID
-    batch.set(doc(db, 'multiEntitlements', paymentReq.uid), {
-      uid: paymentReq.uid,
-      planId: MULTI5_PLAN_ID,
-      active: true,
-      maxConcurrentLinks: MULTI5_CONCURRENT_LINKS,
-      amountBdt: MULTI5_PRICE_BDT,
-      sourceRequestId: paymentReq.id,
-      transactionId: paymentReq.transactionId,
-      approvedBy: adminSession.uid,
-      approvedByEmail: adminSession.email.slice(0, 120),
-      activatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `paymentRequests/${paymentReq.id}`);
-  }
+  emitSyncTopics('payments-me', 'admin-overview');
 }
 
 export async function revokeMulti5PaymentAccessSecure(params: {
   request: PaymentRequestRecord;
   adminNote?: string;
 }): Promise<void> {
-  const adminSession = await assertVerifiedAdminSession();
-  const { request: paymentReq, adminNote } = params;
-
-  if (paymentReq.status !== 'approved') {
-    throw new Error('Only approved Multi (5) requests can be revoked.');
-  }
-
-  const cleanNote = (adminNote ?? '').trim().slice(0, 240);
-  const batch = writeBatch(db);
-
-  batch.update(doc(db, 'paymentRequests', paymentReq.id), {
-    status: 'rejected',
-    adminNote: cleanNote || 'Multi (5) access revoked by administrator.',
-    reviewedBy: adminSession.uid,
-    reviewedByEmail: adminSession.email.slice(0, 120),
-    reviewedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+  await assertVerifiedAdminSession();
+  await apiRequest(`/api/admin/payments/${encodeURIComponent(params.request.id)}/revoke`, {
+    method: 'POST',
+    body: {
+      adminNote: params.adminNote,
+    },
   });
 
-  const entitlementRef = doc(db, 'multiEntitlements', paymentReq.uid);
-  const entitlementSnap = await getDoc(entitlementRef);
-  if (entitlementSnap.exists()) {
-    batch.delete(entitlementRef);
-  }
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `paymentRequests/${paymentReq.id}`);
-  }
+  emitSyncTopics('payments-me', 'admin-overview');
 }
 
 export function subscribeMyPaymentRequests(
-  uid: string,
+  _uid: string,
   onUpdate: (requests: PaymentRequestRecord[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'paymentRequests'), where('uid', '==', uid), limit(25));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items = snap.docs
-        .map((d) => mapPaymentRequest(d.id, d.data()))
-        .sort((a, b) => b.createdAtMs - a.createdAtMs);
-      onUpdate(items);
+  return createPollingSubscription<PaymentRequestRecord[]>(
+    'payments-me',
+    async () => {
+      const res = await apiRequest<{
+        requests: PaymentRequestRecord[];
+        entitlement: MultiEntitlementRecord | null;
+      }>('/api/payments/me');
+      return res.requests || [];
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'paymentRequests', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }
 
 export function subscribeMyMultiEntitlement(
-  uid: string,
+  _uid: string,
   onUpdate: (entitlement: MultiEntitlementRecord | null) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const docPath = `multiEntitlements/${uid}`;
-  return onSnapshot(
-    doc(db, 'multiEntitlements', uid),
-    (snap) => {
-      if (!snap.exists()) {
-        onUpdate(null);
-        return;
-      }
-      const data = snap.data();
-      onUpdate({
-        uid: String(data.uid ?? uid),
-        planId: MULTI5_PLAN_ID,
-        active: Boolean(data.active),
-        maxConcurrentLinks: Number(data.maxConcurrentLinks ?? MULTI5_CONCURRENT_LINKS),
-        amountBdt: Number(data.amountBdt ?? MULTI5_PRICE_BDT),
-        sourceRequestId: String(data.sourceRequestId ?? ''),
-        transactionId: String(data.transactionId ?? ''),
-        approvedBy: String(data.approvedBy ?? ''),
-        approvedByEmail: String(data.approvedByEmail ?? ''),
-        activatedAtMs: timestampToMs(data.activatedAt),
-        updatedAtMs: timestampToMs(data.updatedAt),
-      });
+  return createPollingSubscription<MultiEntitlementRecord | null>(
+    'payments-me',
+    async () => {
+      const res = await apiRequest<{
+        requests: PaymentRequestRecord[];
+        entitlement: MultiEntitlementRecord | null;
+      }>('/api/payments/me');
+      return res.entitlement ?? null;
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.GET, docPath, onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }
 
@@ -451,21 +266,19 @@ export function subscribeAdminPaymentRequests(
   onUpdate: (requests: PaymentRequestRecord[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'paymentRequests'), limit(150));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items = snap.docs
-        .map((d) => mapPaymentRequest(d.id, d.data()))
-        .sort((a, b) => {
-          if (a.status === 'pending' && b.status !== 'pending') return -1;
-          if (a.status !== 'pending' && b.status === 'pending') return 1;
-          return b.createdAtMs - a.createdAtMs;
-        });
-      onUpdate(items);
+  return createPollingSubscription<PaymentRequestRecord[]>(
+    'admin-overview',
+    async () => {
+      const res = await apiRequest<{
+        links: ManagedLink[];
+        reports: LinkReportRecord[];
+        logs: ModerationLogRecord[];
+        paymentRequests: PaymentRequestRecord[];
+      }>('/api/admin/overview');
+      return res.paymentRequests || [];
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'paymentRequests', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }

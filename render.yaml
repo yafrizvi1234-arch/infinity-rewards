@@ -1,3 +1,9 @@
+databases:
+  - name: infinity-rewards-db
+    plan: free
+    databaseName: infinity_rewards
+    user: infinity_rewards_user
+
 services:
   - type: web
     name: infinity-rewards
@@ -5,7 +11,7 @@ services:
     plan: free
     autoDeploy: true
     buildCommand: npm install --include=dev --legacy-peer-deps && npm run build
-    startCommand: npm start
+    startCommand: sh -c 'if [ -n "$SQL_HOST" ] && [ -n "$SQL_USER" ]; then SQL_ADMIN_USER="${SQL_ADMIN_USER:-$SQL_USER}" SQL_ADMIN_PASSWORD="${SQL_ADMIN_PASSWORD:-$SQL_PASSWORD}" npx drizzle-kit push --force --config=src/db/drizzle.config.ts; fi && npm start'
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
@@ -14,3 +20,27 @@ services:
         value: 22.23.2
       - key: ADSTERRA_SECRET_MASTER_KEY
         generateValue: true
+      - key: SQL_HOST
+        fromDatabase:
+          name: infinity-rewards-db
+          property: host
+      - key: SQL_USER
+        fromDatabase:
+          name: infinity-rewards-db
+          property: user
+      - key: SQL_PASSWORD
+        fromDatabase:
+          name: infinity-rewards-db
+          property: password
+      - key: SQL_DB_NAME
+        fromDatabase:
+          name: infinity-rewards-db
+          property: database
+      - key: SQL_ADMIN_USER
+        fromDatabase:
+          name: infinity-rewards-db
+          property: user
+      - key: SQL_ADMIN_PASSWORD
+        fromDatabase:
+          name: infinity-rewards-db
+          property: password

@@ -233,7 +233,7 @@ export const AdminModerationScreen: React.FC<AdminModerationScreenProps> = ({
       });
       setNumbersFeedback({
         type: 'success',
-        message: 'bKash & Nagad Personal payment numbers updated in Firestore.',
+        message: 'bKash & Nagad Personal payment numbers updated.',
       });
     } catch (err) {
       setNumbersFeedback({

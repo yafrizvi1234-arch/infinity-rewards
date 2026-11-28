@@ -1,38 +1,25 @@
 import { User } from 'firebase/auth';
-import {
-  Timestamp,
-  collection,
-  doc,
-  getDoc,
-  limit,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  where,
-  writeBatch,
-} from 'firebase/firestore';
 import { USER_AVATAR } from '../data/demoData';
-import {
-  OperationType,
-  auth,
-  db,
-  handleFirestoreError,
-  reportFirestoreListenerError,
-} from '../firebase';
+import { auth } from '../firebase';
 import {
   LinkReportRecord,
-  LinkStatus,
   LinkVisitRecord,
   ManagedLink,
   ModerationLogRecord,
+  PaymentRequestRecord,
   VisitTab,
 } from '../types';
 import { computeUrlKey, validateAndNormalizeUrl } from '../utils/urlValidator';
+import {
+  apiRequest,
+  createPollingSubscription,
+  emitSyncTopics,
+} from './apiClient';
 
 export const ADMIN_EMAIL = 'yafrizvi1234@gmail.com';
-export const MIN_COOLDOWN_SEC = 12 * 3600; // 43,200s (12 hours)
-export const MAX_COOLDOWN_SEC = 24 * 3600; // 86,400s (24 hours)
-export const DEFAULT_SPAM_COOLDOWN_SEC = 18 * 3600; // 64,800s (18 hours)
+export const MIN_COOLDOWN_SEC = 12 * 3600;
+export const MAX_COOLDOWN_SEC = 24 * 3600;
+export const DEFAULT_SPAM_COOLDOWN_SEC = 18 * 3600;
 
 export function getRandomCooldownSec(): number {
   return (
@@ -103,54 +90,6 @@ export async function assertVerifiedAdminSession(): Promise<{ uid: string; email
   };
 }
 
-function timestampToMs(val: unknown): number {
-  if (val instanceof Timestamp) return val.toMillis();
-  if (typeof val === 'object' && val !== null && 'toMillis' in val) {
-    try {
-      return Number((val as { toMillis: () => number }).toMillis());
-    } catch {
-      return Date.now();
-    }
-  }
-  return Date.now();
-}
-
-function mapManagedLink(id: string, data: Record<string, unknown>): ManagedLink {
-  const status: LinkStatus =
-    data.status === 'approved' || data.status === 'rejected' || data.status === 'pending'
-      ? data.status
-      : 'pending';
-  const type: VisitTab = data.type === 'website' ? 'website' : 'smartlink';
-
-  return {
-    id,
-    ownerId: String(data.ownerId ?? ''),
-    ownerName: String(data.ownerName ?? 'Member'),
-    ownerUsername: String(data.ownerUsername ?? '@member'),
-    ownerAvatar: String(data.ownerAvatar ?? USER_AVATAR),
-    type,
-    title: String(data.title ?? 'Untitled Link'),
-    description: String(data.description ?? ''),
-    url: String(data.url ?? ''),
-    normalizedUrl: String(data.normalizedUrl ?? data.url ?? ''),
-    urlKey: String(data.urlKey ?? ''),
-    domain: String(data.domain ?? ''),
-    isHttps: Boolean(data.isHttps),
-    category: String(data.category ?? 'Other'),
-    status,
-    cooldownSec: Number(data.cooldownSec ?? DEFAULT_SPAM_COOLDOWN_SEC),
-    targetGeos: Array.isArray(data.targetGeos)
-      ? data.targetGeos.slice(0, 8).map((g) => String(g).toUpperCase())
-      : undefined,
-    reportCount: Number(data.reportCount ?? 0),
-    moderationNote: data.moderationNote ? String(data.moderationNote) : undefined,
-    moderatedBy: data.moderatedBy ? String(data.moderatedBy) : undefined,
-    moderatedAtMs: data.moderatedAt ? timestampToMs(data.moderatedAt) : undefined,
-    createdAtMs: timestampToMs(data.createdAt),
-    updatedAtMs: timestampToMs(data.updatedAt),
-  };
-}
-
 export async function checkIsAdminUser(
   user: User | null,
   forceRefresh = true
@@ -173,19 +112,10 @@ export async function checkDuplicateUrlKey(urlKey: string): Promise<{
   isDuplicate: boolean;
   existingLinkId?: string;
 }> {
-  const path = `linkRegistry/${urlKey}`;
-  try {
-    const snap = await getDoc(doc(db, 'linkRegistry', urlKey));
-    if (!snap.exists()) {
-      return { isDuplicate: false };
-    }
-    return {
-      isDuplicate: true,
-      existingLinkId: String(snap.data()?.linkId ?? ''),
-    };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
+  return apiRequest<{ isDuplicate: boolean; existingLinkId?: string }>(
+    `/api/links/check-duplicate?urlKey=${encodeURIComponent(urlKey)}`,
+    { method: 'GET' }
+  );
 }
 
 export async function submitLinkSecure(params: {
@@ -216,122 +146,30 @@ export async function submitLinkSecure(params: {
     throw new Error('Description must be at least 10 characters.');
   }
 
-  const cleanCategory = params.category.trim().slice(0, 40) || 'Other';
-  const safeTargetGeos = sanitizeTargetGeos(params.targetGeos);
   const urlKey = await computeUrlKey(validation.normalizedUrl);
-
   const dup = await checkDuplicateUrlKey(urlKey);
   if (dup.isDuplicate) {
     throw new Error('This URL has already been submitted. Duplicate links are not permitted.');
   }
 
-  const linkRef = doc(collection(db, 'links'));
-  const cooldown = clampSafeCooldownSec(params.cooldownSec);
-
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'linkRegistry', urlKey), {
-    linkId: linkRef.id,
-    ownerId: params.uid,
-    normalizedUrl: validation.normalizedUrl,
-    createdAt: serverTimestamp(),
+  const res = await apiRequest<{ id: string }>('/api/links', {
+    method: 'POST',
+    body: {
+      ownerName: params.ownerName,
+      ownerUsername: params.ownerUsername,
+      ownerAvatar: params.ownerAvatar,
+      type: params.type,
+      title: cleanTitle,
+      description: cleanDescription,
+      rawUrl: params.rawUrl,
+      category: params.category.trim().slice(0, 40) || 'Other',
+      cooldownSec: clampSafeCooldownSec(params.cooldownSec),
+      targetGeos: sanitizeTargetGeos(params.targetGeos),
+    },
   });
 
-  batch.set(linkRef, {
-    id: linkRef.id,
-    ownerId: params.uid,
-    ownerName: params.ownerName.trim().slice(0, 50) || 'Member',
-    ownerUsername: params.ownerUsername.trim().slice(0, 32) || '@member',
-    ownerAvatar: params.ownerAvatar.slice(0, 140000),
-    type: params.type,
-    title: cleanTitle,
-    description: cleanDescription,
-    url: validation.url,
-    normalizedUrl: validation.normalizedUrl,
-    urlKey,
-    domain: validation.domain.slice(0, 120),
-    isHttps: Boolean(validation.isHttps),
-    category: cleanCategory,
-    status: params.type === 'smartlink' ? 'approved' : 'pending',
-    cooldownSec: cooldown,
-    targetGeos: safeTargetGeos,
-    reportCount: 0,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `links/${linkRef.id}`);
-  }
-
-  return linkRef.id;
-}
-
-const ALLOWED_LINK_KEYS = new Set([
-  'id',
-  'ownerId',
-  'ownerName',
-  'ownerUsername',
-  'ownerAvatar',
-  'type',
-  'title',
-  'description',
-  'url',
-  'normalizedUrl',
-  'urlKey',
-  'domain',
-  'isHttps',
-  'category',
-  'status',
-  'cooldownSec',
-  'targetGeos',
-  'reportCount',
-  'moderationNote',
-  'moderatedBy',
-  'moderatedAt',
-  'createdAt',
-  'updatedAt',
-]);
-
-function isRawLinkSchemaCompliant(linkId: string, raw: Record<string, unknown>): boolean {
-  const keys = Object.keys(raw);
-  if (keys.some((k) => !ALLOWED_LINK_KEYS.has(k))) return false;
-  if (raw.id !== linkId) return false;
-  if (typeof raw.ownerId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw.ownerId)) return false;
-  if (typeof raw.ownerName !== 'string' || raw.ownerName.length < 1 || raw.ownerName.length > 50) return false;
-  if (typeof raw.ownerUsername !== 'string' || raw.ownerUsername.length < 2 || raw.ownerUsername.length > 32) return false;
-  if (typeof raw.ownerAvatar !== 'string' || raw.ownerAvatar.length > 140000) return false;
-  if (raw.type !== 'smartlink' && raw.type !== 'website') return false;
-  if (typeof raw.title !== 'string' || raw.title.length < 3 || raw.title.length > 80) return false;
-  if (typeof raw.description !== 'string' || raw.description.length < 10 || raw.description.length > 300) return false;
-  if (typeof raw.url !== 'string' || raw.url.length < 10 || raw.url.length > 500 || !/^https?:\/\/\S+$/.test(raw.url)) return false;
-  if (typeof raw.normalizedUrl !== 'string' || raw.normalizedUrl.length < 10 || raw.normalizedUrl.length > 500 || !/^https?:\/\/\S+$/.test(raw.normalizedUrl)) return false;
-  if (typeof raw.urlKey !== 'string' || !/^[a-zA-Z0-9_-]{8,96}$/.test(raw.urlKey)) return false;
-  if (typeof raw.domain !== 'string' || raw.domain.length < 3 || raw.domain.length > 120) return false;
-  if (typeof raw.isHttps !== 'boolean') return false;
-  if (typeof raw.category !== 'string' || raw.category.length < 2 || raw.category.length > 40) return false;
-  if (raw.status !== 'pending' && raw.status !== 'approved' && raw.status !== 'rejected') return false;
-  if (typeof raw.cooldownSec !== 'number' || !Number.isInteger(raw.cooldownSec) || raw.cooldownSec < 30 || raw.cooldownSec > MAX_COOLDOWN_SEC) return false;
-  if ('targetGeos' in raw) {
-    if (
-      !Array.isArray(raw.targetGeos) ||
-      raw.targetGeos.length < 1 ||
-      raw.targetGeos.length > 8 ||
-      typeof raw.targetGeos[0] !== 'string' ||
-      raw.targetGeos[0].length < 2 ||
-      raw.targetGeos[0].length > 10
-    ) {
-      return false;
-    }
-  }
-  if (typeof raw.reportCount !== 'number' || !Number.isInteger(raw.reportCount) || raw.reportCount < 0 || raw.reportCount > 10000) return false;
-  if ('moderationNote' in raw && (typeof raw.moderationNote !== 'string' || raw.moderationNote.length > 240)) return false;
-  if ('moderatedBy' in raw && (typeof raw.moderatedBy !== 'string' || raw.moderatedBy.length > 128)) return false;
-  if ('moderatedAt' in raw && !(raw.moderatedAt instanceof Timestamp)) return false;
-  if (!(raw.createdAt instanceof Timestamp)) return false;
-  if (!(raw.updatedAt instanceof Timestamp)) return false;
-  return true;
+  emitSyncTopics('links-approved', 'links-mine', 'admin-overview');
+  return res.id;
 }
 
 export async function updateOwnLinkSecure(params: {
@@ -348,125 +186,19 @@ export async function updateOwnLinkSecure(params: {
     throw new Error('You can only edit links you submitted.');
   }
 
-  const validation = validateAndNormalizeUrl(params.rawUrl);
-  if (!validation.valid || !validation.url || !validation.normalizedUrl || !validation.domain) {
-    throw new Error(validation.error || 'Invalid URL.');
-  }
-
-  const cleanTitle = params.title.trim().slice(0, 80);
-  if (cleanTitle.length < 3) {
-    throw new Error('Link title must be at least 3 characters.');
-  }
-
-  const cleanDescription = params.description.trim().slice(0, 300);
-  if (cleanDescription.length < 10) {
-    throw new Error('Description must be at least 10 characters.');
-  }
-
-  const cleanCategory = params.category.trim().slice(0, 40);
-  const safeCategory = cleanCategory.length >= 2 ? cleanCategory : 'Other';
-  const nextUrlKey = await computeUrlKey(validation.normalizedUrl);
-  const fallbackOldUrlKey = params.existingLink.urlKey;
-  const linkRef = doc(db, 'links', params.existingLink.id);
-
-  const [linkSnap, nextRegSnap] = await Promise.all([
-    getDoc(linkRef),
-    getDoc(doc(db, 'linkRegistry', nextUrlKey)),
-  ]);
-
-  if (!linkSnap.exists()) {
-    throw new Error('This link no longer exists.');
-  }
-
-  if (nextRegSnap.exists() && nextRegSnap.data()?.linkId !== params.existingLink.id) {
-    throw new Error('Another link already uses this destination URL.');
-  }
-
-  const liveOldUrlKey = String(linkSnap.data()?.urlKey || fallbackOldUrlKey || '').trim();
-  const urlChanged = Boolean(liveOldUrlKey && liveOldUrlKey !== nextUrlKey);
-  const oldRegSnap = urlChanged
-    ? await getDoc(doc(db, 'linkRegistry', liveOldUrlKey))
-    : null;
-
-  const batch = writeBatch(db);
-  if (urlChanged && oldRegSnap?.exists()) {
-    batch.delete(doc(db, 'linkRegistry', liveOldUrlKey));
-  }
-  if (!nextRegSnap.exists()) {
-    batch.set(doc(db, 'linkRegistry', nextUrlKey), {
-      linkId: params.existingLink.id,
-      ownerId: params.uid,
-      normalizedUrl: validation.normalizedUrl,
-      createdAt: serverTimestamp(),
-    });
-  }
-
-  const safeTargetGeos = sanitizeTargetGeos(params.targetGeos ?? params.existingLink.targetGeos);
-  const raw = linkSnap.data();
-  if (isRawLinkSchemaCompliant(params.existingLink.id, raw)) {
-    const safeCooldown = clampSafeCooldownSec(
-      typeof raw.cooldownSec === 'number' ? raw.cooldownSec : undefined
-    );
-    batch.update(linkRef, {
+  await apiRequest(`/api/links/${encodeURIComponent(params.existingLink.id)}`, {
+    method: 'PUT',
+    body: {
       type: params.type,
-      title: cleanTitle,
-      description: cleanDescription,
-      url: validation.url,
-      normalizedUrl: validation.normalizedUrl,
-      urlKey: nextUrlKey,
-      domain: validation.domain.slice(0, 120),
-      isHttps: Boolean(validation.isHttps),
-      category: safeCategory,
-      cooldownSec: safeCooldown,
-      targetGeos: safeTargetGeos,
-      status: params.type === 'smartlink' ? 'approved' : 'pending',
-      updatedAt: serverTimestamp(),
-    });
-  } else {
-    const safeOwnerName =
-      String(raw.ownerName ?? params.existingLink.ownerName ?? 'Member').trim().slice(0, 50) || 'Member';
-    const rawUsername = String(raw.ownerUsername ?? params.existingLink.ownerUsername ?? '@member').trim().slice(0, 32);
-    const safeOwnerUsername = rawUsername.length >= 2 ? rawUsername : '@member';
-    const safeOwnerAvatar = String(raw.ownerAvatar ?? params.existingLink.ownerAvatar ?? USER_AVATAR).slice(0, 140000);
-    const safeCooldown = clampSafeCooldownSec(
-      typeof raw.cooldownSec === 'number' && Number.isInteger(raw.cooldownSec)
-        ? raw.cooldownSec
-        : undefined
-    );
-    const safeReportCount =
-      typeof raw.reportCount === 'number' && Number.isInteger(raw.reportCount) && raw.reportCount >= 0
-        ? Math.min(10000, raw.reportCount)
-        : 0;
+      title: params.title,
+      description: params.description,
+      rawUrl: params.rawUrl,
+      category: params.category,
+      targetGeos: sanitizeTargetGeos(params.targetGeos ?? params.existingLink.targetGeos),
+    },
+  });
 
-    batch.set(linkRef, {
-      id: params.existingLink.id,
-      ownerId: String(raw.ownerId ?? params.uid),
-      ownerName: safeOwnerName,
-      ownerUsername: safeOwnerUsername,
-      ownerAvatar: safeOwnerAvatar,
-      type: params.type,
-      title: cleanTitle,
-      description: cleanDescription,
-      url: validation.url,
-      normalizedUrl: validation.normalizedUrl,
-      urlKey: nextUrlKey,
-      domain: validation.domain.slice(0, 120),
-      isHttps: Boolean(validation.isHttps),
-      category: safeCategory,
-      status: params.type === 'smartlink' ? 'approved' : 'pending',
-      cooldownSec: safeCooldown,
-      targetGeos: safeTargetGeos,
-      reportCount: safeReportCount,
-      createdAt: raw.createdAt instanceof Timestamp ? raw.createdAt : serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `links/${params.existingLink.id}`);
-  }
+  emitSyncTopics('links-approved', 'links-mine', 'admin-overview');
 }
 
 export async function deleteLinkSecure(params: {
@@ -480,81 +212,40 @@ export async function deleteLinkSecure(params: {
   if (!asAdmin && link.ownerId !== actorUid) {
     throw new Error('You can only delete your own links.');
   }
-
-  let verifiedAdmin: { uid: string; email: string } | null = null;
   if (asAdmin) {
-    verifiedAdmin = await assertVerifiedAdminSession();
+    await assertVerifiedAdminSession();
   }
 
-  const regSnap = link.urlKey ? await getDoc(doc(db, 'linkRegistry', link.urlKey)) : null;
+  await apiRequest(`/api/links/${encodeURIComponent(link.id)}`, {
+    method: 'DELETE',
+    body: {
+      asAdmin: Boolean(asAdmin),
+      reason,
+    },
+  });
 
-  const batch = writeBatch(db);
-  batch.delete(doc(db, 'links', link.id));
-  if (link.urlKey && regSnap?.exists()) {
-    batch.delete(doc(db, 'linkRegistry', link.urlKey));
-  }
-
-  if (verifiedAdmin) {
-    const logRef = doc(collection(db, 'moderationLogs'));
-    batch.set(logRef, {
-      linkId: link.id,
-      linkTitle: link.title.slice(0, 80),
-      targetOwnerId: link.ownerId,
-      action: 'remove',
-      reason: (reason || 'Removed by administrator').trim().slice(0, 240),
-      adminUid: verifiedAdmin.uid,
-      adminEmail: verifiedAdmin.email.slice(0, 120),
-      createdAt: serverTimestamp(),
-    });
-  }
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `links/${link.id}`);
-  }
+  emitSyncTopics('links-approved', 'links-mine', 'admin-overview');
 }
 
-/**
- * Records external link opening strictly for user history & spam-prevention cooldown.
- * Intentionally awards ZERO points/rewards and does NOT count as ad impressions.
- */
 export async function recordExternalLinkOpen(params: {
   uid: string;
   link: ManagedLink;
 }): Promise<string> {
-  const visitRef = doc(collection(db, 'linkVisits'));
-  const urlCheck = validateAndNormalizeUrl(params.link.url || '');
-  const safeUrl =
-    urlCheck.valid && urlCheck.url
-      ? urlCheck.url
-      : /^https?:\/\/\S{4,}$/.test((params.link.url || '').trim())
-        ? params.link.url.trim().slice(0, 500)
-        : 'https://example.com';
-  const rawDomain = (urlCheck.domain || params.link.domain || '').trim();
-  const safeDomain = rawDomain.length >= 3 ? rawDomain.slice(0, 120) : 'example.com';
-  const safeTitle = (params.link.title || '').trim().slice(0, 80) || 'Smartlink';
-  const safeCategory = (params.link.category || '').trim().slice(0, 40) || 'Other';
-
-  const batch = writeBatch(db);
-  batch.set(visitRef, {
-    uid: params.uid,
-    linkId: params.link.id,
-    linkTitle: safeTitle,
-    linkType: params.link.type,
-    category: safeCategory,
-    domain: safeDomain,
-    url: safeUrl,
-    createdAt: serverTimestamp(),
+  const res = await apiRequest<{ id: string }>('/api/links/visit-open', {
+    method: 'POST',
+    body: {
+      linkId: params.link.id,
+      linkTitle: params.link.title,
+      linkType: params.link.type,
+      category: params.link.category,
+      domain: params.link.domain,
+      url: params.link.url,
+      cooldownSec: clampSafeCooldownSec(params.link.cooldownSec),
+    },
   });
 
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `linkVisits/${visitRef.id}`);
-  }
-
-  return visitRef.id;
+  emitSyncTopics('links-visits');
+  return res.id;
 }
 
 export async function reportLinkSecure(params: {
@@ -568,54 +259,16 @@ export async function reportLinkSecure(params: {
     throw new Error('Please provide a clear reason (at least 5 characters).');
   }
 
-  const reportId = `${params.reporterUid}_${params.link.id}`;
-  const reportRef = doc(db, 'linkReports', reportId);
-  const linkRef = doc(db, 'links', params.link.id);
-
-  let existingSnap;
-  let linkSnap;
-  try {
-    [existingSnap, linkSnap] = await Promise.all([getDoc(reportRef), getDoc(linkRef)]);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `linkReports/${reportId}`);
-  }
-
-  if (existingSnap.exists()) {
-    throw new Error('You have already submitted a report for this link.');
-  }
-  if (!linkSnap.exists()) {
-    throw new Error('This link is no longer available.');
-  }
-
-  const rawReportCount = linkSnap.data()?.reportCount;
-  const liveReportCount =
-    typeof rawReportCount === 'number' && Number.isInteger(rawReportCount) && rawReportCount >= 0
-      ? rawReportCount
-      : 0;
-
-  const batch = writeBatch(db);
-  batch.set(reportRef, {
-    linkId: params.link.id,
-    linkTitle: params.link.title.slice(0, 80),
-    linkUrl: params.link.url.slice(0, 500),
-    reporterId: params.reporterUid,
-    reporterUsername: params.reporterUsername.slice(0, 32),
-    reason: cleanReason,
-    status: 'open',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+  await apiRequest('/api/links/report', {
+    method: 'POST',
+    body: {
+      linkId: params.link.id,
+      reporterUsername: params.reporterUsername,
+      reason: cleanReason,
+    },
   });
 
-  batch.update(linkRef, {
-    reportCount: Math.min(10000, liveReportCount + 1),
-    updatedAt: serverTimestamp(),
-  });
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `linkReports/${reportId}`);
-  }
+  emitSyncTopics('links-approved', 'admin-overview');
 }
 
 export async function moderateLinkSecure(params: {
@@ -625,115 +278,17 @@ export async function moderateLinkSecure(params: {
   adminUid: string;
   adminEmail: string | null;
 }): Promise<void> {
-  const adminSession = await assertVerifiedAdminSession();
-  const cleanNote = params.note.trim().slice(0, 240);
-  const linkRef = doc(db, 'links', params.link.id);
-  const linkSnap = await getDoc(linkRef);
-  if (!linkSnap.exists()) {
-    throw new Error('This link no longer exists.');
-  }
+  await assertVerifiedAdminSession();
 
-  const raw = linkSnap.data();
-  const batch = writeBatch(db);
-
-  if (isRawLinkSchemaCompliant(params.link.id, raw)) {
-    batch.update(linkRef, {
-      status: params.decision,
-      moderationNote: cleanNote,
-      moderatedBy: adminSession.uid,
-      moderatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } else {
-    const rawUrlCandidate = String(raw.url || params.link.url || '').trim();
-    const urlCheck = validateAndNormalizeUrl(rawUrlCandidate);
-    const safeUrl =
-      urlCheck.valid && urlCheck.url
-        ? urlCheck.url
-        : /^https?:\/\/\S{4,}$/.test(rawUrlCandidate)
-          ? rawUrlCandidate.slice(0, 500)
-          : 'https://example.com';
-    const safeNormalizedUrl =
-      urlCheck.valid && urlCheck.normalizedUrl ? urlCheck.normalizedUrl : safeUrl;
-    const safeDomain =
-      urlCheck.valid && urlCheck.domain && urlCheck.domain.length >= 3
-        ? urlCheck.domain.slice(0, 120)
-        : String(raw.domain || params.link.domain || 'example.com').trim().slice(0, 120) || 'example.com';
-    const safeUrlKey =
-      typeof raw.urlKey === 'string' && /^[a-zA-Z0-9_-]{8,96}$/.test(raw.urlKey)
-        ? raw.urlKey
-        : await computeUrlKey(safeNormalizedUrl);
-    const rawTitle = String(raw.title ?? params.link.title ?? 'Community Link').trim().slice(0, 80);
-    const safeTitle = rawTitle.length >= 3 ? rawTitle : 'Community Link';
-    const rawDesc = String(raw.description ?? params.link.description ?? '').trim().slice(0, 300);
-    const safeDescription =
-      rawDesc.length >= 10 ? rawDesc : 'Community shared resource verified by moderation.';
-    const rawCategory = String(raw.category ?? params.link.category ?? 'Other').trim().slice(0, 40);
-    const safeCategory = rawCategory.length >= 2 ? rawCategory : 'Other';
-    const safeOwnerName =
-      String(raw.ownerName ?? params.link.ownerName ?? 'Member').trim().slice(0, 50) || 'Member';
-    const rawUsername = String(raw.ownerUsername ?? params.link.ownerUsername ?? '@member').trim().slice(0, 32);
-    const safeOwnerUsername = rawUsername.length >= 2 ? rawUsername : '@member';
-    const safeOwnerAvatar = String(raw.ownerAvatar ?? params.link.ownerAvatar ?? USER_AVATAR).slice(0, 140000);
-    const safeCooldown = clampSafeCooldownSec(
-      typeof raw.cooldownSec === 'number' && Number.isInteger(raw.cooldownSec)
-        ? raw.cooldownSec
-        : undefined
-    );
-    const safeReportCount =
-      typeof raw.reportCount === 'number' && Number.isInteger(raw.reportCount) && raw.reportCount >= 0
-        ? Math.min(10000, raw.reportCount)
-        : 0;
-
-    batch.set(linkRef, {
-      id: params.link.id,
-      ownerId: String(raw.ownerId ?? params.link.ownerId),
-      ownerName: safeOwnerName,
-      ownerUsername: safeOwnerUsername,
-      ownerAvatar: safeOwnerAvatar,
-      type: raw.type === 'website' ? 'website' : 'smartlink',
-      title: safeTitle,
-      description: safeDescription,
-      url: safeUrl,
-      normalizedUrl: safeNormalizedUrl,
-      urlKey: safeUrlKey,
-      domain: safeDomain.length >= 3 ? safeDomain : 'example.com',
-      isHttps: typeof raw.isHttps === 'boolean' ? raw.isHttps : safeUrl.startsWith('https://'),
-      category: safeCategory,
-      status: params.decision,
-      cooldownSec: safeCooldown,
-      reportCount: safeReportCount,
-      moderationNote: cleanNote,
-      moderatedBy: adminSession.uid,
-      moderatedAt: serverTimestamp(),
-      createdAt: raw.createdAt instanceof Timestamp ? raw.createdAt : serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  const safeLogTitle =
-    (String(raw.title ?? params.link.title ?? '').trim() || 'Community Link').slice(0, 80);
-  const safeTargetOwnerId = String(raw.ownerId ?? params.link.ownerId ?? '').trim() || adminSession.uid;
-
-  const logRef = doc(collection(db, 'moderationLogs'));
-  batch.set(logRef, {
-    linkId: params.link.id,
-    linkTitle: safeLogTitle,
-    targetOwnerId: safeTargetOwnerId,
-    action: params.decision === 'approved' ? 'approve' : 'reject',
-    reason:
-      cleanNote ||
-      (params.decision === 'approved' ? 'Approved for public directory' : 'Rejected by moderator'),
-    adminUid: adminSession.uid,
-    adminEmail: adminSession.email.slice(0, 120),
-    createdAt: serverTimestamp(),
+  await apiRequest(`/api/admin/links/${encodeURIComponent(params.link.id)}/moderate`, {
+    method: 'POST',
+    body: {
+      decision: params.decision,
+      note: params.note,
+    },
   });
 
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `links/${params.link.id}`);
-  }
+  emitSyncTopics('links-approved', 'links-mine', 'admin-overview');
 }
 
 export async function resolveReportSecure(params: {
@@ -744,202 +299,96 @@ export async function resolveReportSecure(params: {
   adminUid: string;
   adminEmail: string | null;
 }): Promise<void> {
-  const adminSession = await assertVerifiedAdminSession();
-  const cleanNote = params.adminNote.trim().slice(0, 240);
-  const batch = writeBatch(db);
+  await assertVerifiedAdminSession();
 
-  batch.update(doc(db, 'linkReports', params.report.id), {
-    status: params.action === 'resolve_and_remove' ? 'resolved' : 'dismissed',
-    adminNote: cleanNote || (params.action === 'resolve_and_remove' ? 'Link removed' : 'Report dismissed'),
-    updatedAt: serverTimestamp(),
+  await apiRequest(`/api/admin/reports/${encodeURIComponent(params.report.id)}/resolve`, {
+    method: 'POST',
+    body: {
+      action: params.action,
+      adminNote: params.adminNote,
+    },
   });
 
-  const targetLinkId = params.linkedItem?.id || params.report.linkId;
-  const linkRef = targetLinkId ? doc(db, 'links', targetLinkId) : null;
-  const linkSnap =
-    params.action === 'resolve_and_remove' && linkRef ? await getDoc(linkRef) : null;
-
-  if (params.action === 'resolve_and_remove' && linkRef && linkSnap?.exists()) {
-    batch.delete(linkRef);
-  }
-
-  const resolvedUrlKey = String(
-    params.linkedItem?.urlKey || linkSnap?.data()?.urlKey || ''
-  ).trim();
-  if (params.action === 'resolve_and_remove' && resolvedUrlKey) {
-    const regRef = doc(db, 'linkRegistry', resolvedUrlKey);
-    const regSnap = await getDoc(regRef);
-    if (regSnap.exists()) {
-      batch.delete(regRef);
-    }
-  }
-
-  const targetOwnerId =
-    params.linkedItem?.ownerId ||
-    String(linkSnap?.data()?.ownerId || '').trim() ||
-    params.report.reporterId;
-
-  const logRef = doc(collection(db, 'moderationLogs'));
-  batch.set(logRef, {
-    linkId: params.report.linkId,
-    linkTitle: params.report.linkTitle.slice(0, 80),
-    targetOwnerId,
-    action: params.action === 'resolve_and_remove' ? 'resolve_report' : 'dismiss_report',
-    reason:
-      cleanNote ||
-      (params.action === 'resolve_and_remove'
-        ? `Removed reported link: ${params.report.reason}`
-        : `Dismissed report: ${params.report.reason}`
-      ).slice(0, 240),
-    adminUid: adminSession.uid,
-    adminEmail: adminSession.email.slice(0, 120),
-    createdAt: serverTimestamp(),
-  });
-
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `linkReports/${params.report.id}`);
-  }
+  emitSyncTopics('links-approved', 'links-mine', 'admin-overview');
 }
 
-// Subscriptions (single-field equality queries + client sorting to prevent composite index issues)
+function hydrateLinkAvatar(link: ManagedLink): ManagedLink {
+  return {
+    ...link,
+    ownerAvatar: link.ownerAvatar || USER_AVATAR,
+  };
+}
+
 export function subscribeApprovedLinks(
   onUpdate: (links: ManagedLink[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const approvedById = new Map<string, ManagedLink>();
-  const smartlinksById = new Map<string, ManagedLink>();
-
-  const emitMerged = () => {
-    const merged = new Map<string, ManagedLink>();
-    for (const [id, item] of approvedById) {
-      merged.set(id, item);
-    }
-    for (const [id, item] of smartlinksById) {
-      if (item.status !== 'rejected') {
-        merged.set(id, { ...item, status: 'approved' });
-      }
-    }
-    const items = Array.from(merged.values()).sort((a, b) => {
-      if (a.isHttps !== b.isHttps) return a.isHttps ? -1 : 1;
-      return b.updatedAtMs - a.updatedAtMs;
-    });
-    onUpdate(items);
-  };
-
-  const approvedQ = query(collection(db, 'links'), where('status', '==', 'approved'), limit(150));
-  const smartlinksQ = query(collection(db, 'links'), where('type', '==', 'smartlink'), limit(150));
-
-  const unsubApproved = onSnapshot(
-    approvedQ,
-    (snap) => {
-      approvedById.clear();
-      for (const d of snap.docs) {
-        const mapped = mapManagedLink(d.id, d.data());
-        if (mapped.status !== 'rejected') {
-          approvedById.set(d.id, mapped);
-        }
-      }
-      emitMerged();
+  return createPollingSubscription<ManagedLink[]>(
+    'links-approved',
+    async () => {
+      const res = await apiRequest<{ links: ManagedLink[] }>('/api/links/approved');
+      return (res.links || []).map(hydrateLinkAvatar);
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'links', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
-
-  const unsubSmartlinks = onSnapshot(
-    smartlinksQ,
-    (snap) => {
-      smartlinksById.clear();
-      for (const d of snap.docs) {
-        const mapped = mapManagedLink(d.id, d.data());
-        if (mapped.status !== 'rejected') {
-          smartlinksById.set(d.id, mapped);
-        }
-      }
-      emitMerged();
-    },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'links', onError);
-    }
-  );
-
-  return () => {
-    unsubApproved();
-    unsubSmartlinks();
-  };
 }
 
 export function subscribeMySubmittedLinks(
-  uid: string,
+  _uid: string,
   onUpdate: (links: ManagedLink[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'links'), where('ownerId', '==', uid), limit(100));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items = snap.docs
-        .map((d) => mapManagedLink(d.id, d.data()))
-        .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-      onUpdate(items);
+  return createPollingSubscription<ManagedLink[]>(
+    'links-mine',
+    async () => {
+      const res = await apiRequest<{ links: ManagedLink[] }>('/api/links/mine');
+      return (res.links || []).map(hydrateLinkAvatar);
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'links', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }
 
 export function subscribeMyLinkVisits(
-  uid: string,
+  _uid: string,
   onUpdate: (visits: LinkVisitRecord[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'linkVisits'), where('uid', '==', uid), limit(100));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items: LinkVisitRecord[] = snap.docs
-        .map((d) => {
-          const data = d.data();
-          return {
-            id: d.id,
-            uid: String(data.uid ?? uid),
-            linkId: String(data.linkId ?? ''),
-            linkTitle: String(data.linkTitle ?? 'External Link'),
-            linkType: (data.linkType === 'website' ? 'website' : 'smartlink') as VisitTab,
-            category: String(data.category ?? 'Other'),
-            domain: String(data.domain ?? ''),
-            url: String(data.url ?? ''),
-            createdAtMs: timestampToMs(data.createdAt),
-          };
-        })
-        .sort((a, b) => b.createdAtMs - a.createdAtMs);
-      onUpdate(items);
+  return createPollingSubscription<LinkVisitRecord[]>(
+    'links-visits',
+    async () => {
+      const res = await apiRequest<{ visits: LinkVisitRecord[] }>('/api/links/visits');
+      return res.visits || [];
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'linkVisits', onError);
-    }
+    onUpdate,
+    onError,
+    25000
   );
+}
+
+interface AdminOverviewResponse {
+  links: ManagedLink[];
+  reports: LinkReportRecord[];
+  logs: ModerationLogRecord[];
+  paymentRequests: PaymentRequestRecord[];
 }
 
 export function subscribeAdminAllLinks(
   onUpdate: (links: ManagedLink[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'links'), limit(200));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items = snap.docs
-        .map((d) => mapManagedLink(d.id, d.data()))
-        .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-      onUpdate(items);
+  return createPollingSubscription<ManagedLink[]>(
+    'admin-overview',
+    async () => {
+      const res = await apiRequest<AdminOverviewResponse>('/api/admin/overview');
+      return (res.links || []).map(hydrateLinkAvatar);
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'links', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }
 
@@ -947,34 +396,15 @@ export function subscribeAdminReports(
   onUpdate: (reports: LinkReportRecord[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'linkReports'), limit(150));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items: LinkReportRecord[] = snap.docs
-        .map((d) => {
-          const data = d.data();
-          return {
-            id: d.id,
-            linkId: String(data.linkId ?? ''),
-            linkTitle: String(data.linkTitle ?? 'Link'),
-            linkUrl: String(data.linkUrl ?? ''),
-            reporterId: String(data.reporterId ?? ''),
-            reporterUsername: String(data.reporterUsername ?? '@user'),
-            reason: String(data.reason ?? ''),
-            status:
-              data.status === 'resolved' || data.status === 'dismissed' ? data.status : 'open',
-            adminNote: data.adminNote ? String(data.adminNote) : undefined,
-            createdAtMs: timestampToMs(data.createdAt),
-            updatedAtMs: timestampToMs(data.updatedAt),
-          };
-        })
-        .sort((a, b) => b.createdAtMs - a.createdAtMs);
-      onUpdate(items);
+  return createPollingSubscription<LinkReportRecord[]>(
+    'admin-overview',
+    async () => {
+      const res = await apiRequest<AdminOverviewResponse>('/api/admin/overview');
+      return res.reports || [];
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'linkReports', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }
 
@@ -982,38 +412,14 @@ export function subscribeAdminModerationLogs(
   onUpdate: (logs: ModerationLogRecord[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const q = query(collection(db, 'moderationLogs'), limit(150));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items: ModerationLogRecord[] = snap.docs
-        .map((d) => {
-          const data = d.data();
-          const action: ModerationLogRecord['action'] =
-            data.action === 'approve' ||
-            data.action === 'reject' ||
-            data.action === 'remove' ||
-            data.action === 'resolve_report' ||
-            data.action === 'dismiss_report'
-              ? data.action
-              : 'approve';
-          return {
-            id: d.id,
-            linkId: String(data.linkId ?? ''),
-            linkTitle: String(data.linkTitle ?? 'Link'),
-            targetOwnerId: String(data.targetOwnerId ?? ''),
-            action,
-            reason: String(data.reason ?? ''),
-            adminUid: String(data.adminUid ?? ''),
-            adminEmail: String(data.adminEmail ?? ''),
-            createdAtMs: timestampToMs(data.createdAt),
-          };
-        })
-        .sort((a, b) => b.createdAtMs - a.createdAtMs);
-      onUpdate(items);
+  return createPollingSubscription<ModerationLogRecord[]>(
+    'admin-overview',
+    async () => {
+      const res = await apiRequest<AdminOverviewResponse>('/api/admin/overview');
+      return res.logs || [];
     },
-    (error) => {
-      reportFirestoreListenerError(error, OperationType.LIST, 'moderationLogs', onError);
-    }
+    onUpdate,
+    onError,
+    20000
   );
 }

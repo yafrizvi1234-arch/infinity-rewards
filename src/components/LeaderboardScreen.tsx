@@ -163,7 +163,7 @@ export const LeaderboardScreen: React.FC<LeaderboardScreenProps> = ({
                 ? `${myStanding.visitsCount} Visits`
                 : `${myStanding.activeScore.toLocaleString()} PTS`}
             </p>
-            <p className="text-xs text-slate-300">Verified Firestore activity</p>
+            <p className="text-xs text-slate-300">Verified cloud activity</p>
           </div>
         </div>
       )}

@@ -36,7 +36,7 @@ export const OfflineIndicator: React.FC = () => {
       className="fixed bottom-20 left-4 z-50 flex items-center gap-2 rounded-xl border border-amber-400/50 bg-[#1B1406]/95 px-3.5 py-2 text-xs font-semibold text-amber-200 shadow-xl backdrop-blur-md lg:bottom-5"
     >
       <WifiOff className="h-3.5 w-3.5 text-amber-400" />
-      <span>Offline Mode — Live Firestore sync paused</span>
+      <span>Offline Mode — Live cloud sync paused</span>
     </div>
   );
 };

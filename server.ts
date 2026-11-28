@@ -4,10 +4,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
-
-interface FirebaseAppletConfig {
-  projectId: string;
-}
+import * as repo from './src/db/repository.ts';
+import {
+  ADMIN_EMAIL,
+  type AuthRequest,
+  requireAdmin,
+  requireAuth,
+} from './src/middleware/auth.ts';
 
 interface PlacementPreviewItem {
   id: string;
@@ -63,47 +66,25 @@ interface AdsterraDetailedStats {
   fetchedAtMs: number;
 }
 
-interface StoredSecretRecord {
-  iv: string;
-  authTag: string;
-  ciphertext: string;
+interface VaultSafeInput {
   keyHint: string;
   apiVerified: boolean;
   verifiedDomainsCount: number;
   verifiedPlacementsCount: number;
   domainsPreview: Array<{ id: string; title: string }>;
   placementsPreview: PlacementPreviewItem[];
-  statsSummary?: StatsSummary | null;
-  detailedStats?: AdsterraDetailedStats | null;
+  statsSummary?: Record<string, unknown> | null;
+  detailedStats?: Record<string, unknown> | null;
   lastSyncedAtMs: number | null;
-  updatedAtMs: number;
-}
-
-interface VerifiedAuthUser {
-  uid: string;
-  email: string;
-  emailVerified: boolean;
-}
-
-interface AuthenticatedRequest extends Request {
-  verifiedUser?: VerifiedAuthUser;
 }
 
 const ROOT_DIR = process.cwd();
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.join(ROOT_DIR, '.data');
-const SECRETS_FILE = path.join(DATA_DIR, 'adsterra-secrets.enc.json');
 const MASTER_KEY_FILE = path.join(DATA_DIR, '.master.key');
 const ADSTERRA_API_BASE = 'https://api3.adsterratools.com/publisher';
-const FIREBASE_CERTS_URL =
-  'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
 
-const firebaseConfig = JSON.parse(
-  fs.readFileSync(path.join(ROOT_DIR, 'firebase-applet-config.json'), 'utf8')
-) as FirebaseAppletConfig;
-
-let cachedCerts: Record<string, string> = {};
-let cachedCertsExpiresAt = 0;
+let fallbackEphemeralKey: Buffer | null = null;
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -116,16 +97,23 @@ function getEncryptionKey(): Buffer {
   if (envMaster && envMaster.length >= 16) {
     return crypto.createHash('sha256').update(envMaster).digest();
   }
-  ensureDataDir();
-  if (fs.existsSync(MASTER_KEY_FILE)) {
-    const existingHex = fs.readFileSync(MASTER_KEY_FILE, 'utf8').trim();
-    if (/^[a-f0-9]{64}$/i.test(existingHex)) {
-      return Buffer.from(existingHex, 'hex');
+  try {
+    ensureDataDir();
+    if (fs.existsSync(MASTER_KEY_FILE)) {
+      const existingHex = fs.readFileSync(MASTER_KEY_FILE, 'utf8').trim();
+      if (/^[a-f0-9]{64}$/i.test(existingHex)) {
+        return Buffer.from(existingHex, 'hex');
+      }
     }
+    const generated = crypto.randomBytes(32);
+    fs.writeFileSync(MASTER_KEY_FILE, generated.toString('hex'), { mode: 0o600 });
+    return generated;
+  } catch {
+    if (!fallbackEphemeralKey) {
+      fallbackEphemeralKey = crypto.randomBytes(32);
+    }
+    return fallbackEphemeralKey;
   }
-  const generated = crypto.randomBytes(32);
-  fs.writeFileSync(MASTER_KEY_FILE, generated.toString('hex'), { mode: 0o600 });
-  return generated;
 }
 
 function encryptSecret(plaintext: string): { iv: string; authTag: string; ciphertext: string } {
@@ -156,34 +144,13 @@ function decryptSecret(record: { iv: string; authTag: string; ciphertext: string
   return decrypted.toString('utf8');
 }
 
-function readSecretsVault(): Record<string, StoredSecretRecord> {
-  ensureDataDir();
-  if (!fs.existsSync(SECRETS_FILE)) {
-    return {};
-  }
-  try {
-    const raw = fs.readFileSync(SECRETS_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as Record<string, StoredSecretRecord>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSecretsVault(vault: Record<string, StoredSecretRecord>): void {
-  ensureDataDir();
-  const tempFile = `${SECRETS_FILE}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tempFile, JSON.stringify(vault, null, 2), { mode: 0o600 });
-  fs.renameSync(tempFile, SECRETS_FILE);
-}
-
 function maskKeyHint(apiKey: string): string {
   const trimmed = apiKey.trim();
   const tail = trimmed.slice(-4);
   return `••••${tail}`;
 }
 
-function toSafeStatusPayload(record: StoredSecretRecord | undefined) {
+function toSafeStatusPayload(record: VaultSafeInput | null | undefined) {
   if (!record) {
     return {
       backendReachable: true,
@@ -208,136 +175,21 @@ function toSafeStatusPayload(record: StoredSecretRecord | undefined) {
     verifiedPlacementsCount: record.verifiedPlacementsCount,
     domainsPreview: record.domainsPreview,
     placementsPreview: record.placementsPreview,
-    statsSummary: record.statsSummary ?? null,
-    detailedStats: record.detailedStats ?? null,
-    lastSyncedAtMs: record.lastSyncedAtMs,
+    statsSummary: (record.statsSummary as StatsSummary | null) ?? null,
+    detailedStats: (record.detailedStats as AdsterraDetailedStats | null) ?? null,
+    lastSyncedAtMs: record.lastSyncedAtMs ?? null,
   };
 }
 
-function decodeJwtPart(segment: string): Record<string, unknown> {
-  if (!segment) {
-    throw new Error('Malformed Firebase ID token.');
+function handleRouteError(res: Response, error: unknown, fallbackMessage: string): void {
+  if (error instanceof repo.DomainError) {
+    res.status(error.statusCode).json({ error: error.message });
+    return;
   }
-  try {
-    const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-    const padLength = (4 - (base64.length % 4)) % 4;
-    const padded = base64 + '='.repeat(padLength);
-    const json = Buffer.from(padded, 'base64').toString('utf8');
-    const parsed = JSON.parse(json) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Malformed Firebase ID token.');
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error('Malformed Firebase ID token.');
-  }
-}
-
-async function getFirebasePublicCerts(): Promise<Record<string, string>> {
-  const now = Date.now();
-  if (now < cachedCertsExpiresAt && Object.keys(cachedCerts).length > 0) {
-    return cachedCerts;
-  }
-  const resp = await fetch(FIREBASE_CERTS_URL, {
-    signal: AbortSignal.timeout(8000),
+  console.error(fallbackMessage, error);
+  res.status(500).json({
+    error: error instanceof Error ? error.message : fallbackMessage,
   });
-  if (!resp.ok) {
-    throw new Error('Unable to fetch Firebase public verification certificates.');
-  }
-  const certs = (await resp.json()) as Record<string, string>;
-  const cacheControl = resp.headers.get('cache-control') || '';
-  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
-  const maxAgeSec = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
-  cachedCerts = certs;
-  cachedCertsExpiresAt = now + Math.max(60, maxAgeSec) * 1000;
-  return certs;
-}
-
-export async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedAuthUser> {
-  const parts = idToken.split('.');
-  if (parts.length !== 3) {
-    throw new Error('Malformed Firebase ID token.');
-  }
-  const [headerB64, payloadB64, sigB64] = parts;
-  const header = decodeJwtPart(headerB64);
-  const payload = decodeJwtPart(payloadB64);
-
-  if (header.alg !== 'RS256' || typeof header.kid !== 'string') {
-    throw new Error('Invalid ID token algorithm or key identifier.');
-  }
-
-  const certs = await getFirebasePublicCerts();
-  let certPem = certs[header.kid];
-  if (!certPem) {
-    cachedCertsExpiresAt = 0;
-    const refreshed = await getFirebasePublicCerts();
-    certPem = refreshed[header.kid];
-  }
-  if (!certPem) {
-    throw new Error('Unknown Firebase signing certificate.');
-  }
-
-  const verifier = crypto.createVerify('RSA-SHA256');
-  verifier.update(`${headerB64}.${payloadB64}`);
-  verifier.end();
-
-  const signature = Buffer.from(sigB64.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-  const isValidSig = verifier.verify(certPem, signature);
-  if (!isValidSig) {
-    throw new Error('Firebase ID token signature verification failed.');
-  }
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  const expectedIssuer = `https://securetoken.google.com/${firebaseConfig.projectId}`;
-  if (payload.aud !== firebaseConfig.projectId || payload.iss !== expectedIssuer) {
-    throw new Error('Firebase ID token project mismatch.');
-  }
-  if (typeof payload.exp !== 'number' || payload.exp <= nowSec) {
-    throw new Error('Firebase session token has expired.');
-  }
-  if (typeof payload.iat !== 'number' || payload.iat > nowSec + 300) {
-    throw new Error('Firebase ID token issued-at timestamp is invalid.');
-  }
-  if (
-    typeof payload.sub !== 'string' ||
-    !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.sub)
-  ) {
-    throw new Error('Firebase ID token subject UID is invalid.');
-  }
-  if (payload.email_verified !== true || typeof payload.email !== 'string') {
-    throw new Error('Verified email address is required.');
-  }
-
-  return {
-    uid: payload.sub,
-    email: payload.email.toLowerCase(),
-    emailVerified: true,
-  };
-}
-
-async function requireVerifiedFirebaseUser(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const authHeader = req.headers.authorization || '';
-  if (!authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authentication required (Bearer token missing).' });
-    return;
-  }
-  const token = authHeader.slice(7).trim();
-  if (!token) {
-    res.status(401).json({ error: 'Authentication required (empty token).' });
-    return;
-  }
-  try {
-    req.verifiedUser = await verifyFirebaseIdToken(token);
-    next();
-  } catch (err) {
-    res.status(401).json({
-      error: err instanceof Error ? err.message : 'Invalid or expired authentication token.',
-    });
-  }
 }
 
 function formatUtcYmd(offsetDays = 0): string {
@@ -587,7 +439,10 @@ async function fetchAdsterraDetailedStats(params: {
       const pid = String(row.placement_id ?? row.placementId ?? row.placement ?? row.id ?? '').trim();
       const matched = pid ? placementMap.get(pid) : undefined;
       const rawTitle = String(
-        row.placement_title ?? row.title ?? matched?.title ?? (pid ? `Placement #${pid}` : `Placement #${idx + 1}`)
+        row.placement_title ??
+          row.title ??
+          matched?.title ??
+          (pid ? `Placement #${pid}` : `Placement #${idx + 1}`)
       ).slice(0, 80);
       const dTitle = matched?.domainId ? domainMap.get(matched.domainId) : undefined;
       return {
@@ -635,7 +490,6 @@ async function fetchAdsterraDetailedStats(params: {
     byDate.length > 0 ? byDate : byPlacement.length > 0 ? byPlacement : byDomain
   );
 
-  // Compute Today / Yesterday / Last 7d / Last 30d rollups
   let periods: AdsterraDetailedStats['periods'];
   const rollupRowsSource: AdsterraStatRow[] | null =
     periodDateRaw !== null
@@ -867,6 +721,39 @@ async function fetchAdsterraOfficialSnapshot(apiKey: string): Promise<{
   };
 }
 
+function validatePersonalNumber(raw: unknown, channelLabel: string): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (cleaned.length < 6 || cleaned.length > 24 || !/^[0-9+\-\s]{6,24}$/.test(cleaned)) {
+    throw new repo.DomainError(
+      `${channelLabel} number must be 6 to 24 characters using only digits, spaces, + or -.`
+    );
+  }
+  const digitsOnly = cleaned.replace(/\D/g, '');
+  if (digitsOnly.length < 11) {
+    throw new repo.DomainError(
+      `${channelLabel} number must contain at least 11 digits (e.g. 01XXXXXXXXX).`
+    );
+  }
+  return cleaned;
+}
+
+function normalizeAndValidateTxId(raw: unknown): string {
+  const normalized = String(raw || '')
+    .trim()
+    .toUpperCase();
+  if (normalized.length < 6 || normalized.length > 40) {
+    throw new repo.DomainError('Transaction ID must be between 6 and 40 characters.');
+  }
+  if (!/^[A-Z0-9_-]+$/.test(normalized)) {
+    throw new repo.DomainError(
+      'Transaction ID can only contain letters, numbers, hyphens (-), and underscores (_).'
+    );
+  }
+  return normalized;
+}
+
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
@@ -892,7 +779,7 @@ export function createApp() {
     if (origin && isAllowedOrigin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,Accept');
       if (req.method === 'OPTIONS') {
         res.status(204).end();
@@ -901,7 +788,7 @@ export function createApp() {
     }
     next();
   });
-  app.use(express.json({ limit: '64kb' }));
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
@@ -924,16 +811,584 @@ export function createApp() {
     });
   });
 
-  app.get('/api/adsterra/status', requireVerifiedFirebaseUser, (req: AuthenticatedRequest, res) => {
-    const uid = req.verifiedUser!.uid;
-    const vault = readSecretsVault();
-    res.json(toSafeStatusPayload(vault[uid]));
+  // ===========================================================================
+  // WORKSPACE, PROFILES, FOLLOWS, ACTIVITIES
+  // ===========================================================================
+
+  app.post('/api/workspace/bootstrap', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.verifiedUser!;
+      const displayName =
+        typeof req.body?.displayName === 'string'
+          ? req.body.displayName
+          : (req.user?.name as string | undefined) ?? null;
+      const photoURL =
+        typeof req.body?.photoURL === 'string'
+          ? req.body.photoURL
+          : (req.user?.picture as string | undefined) ?? null;
+
+      const workspace = await repo.bootstrapWorkspace({
+        uid: user.uid,
+        email: user.email,
+        displayName,
+        photoURL,
+      });
+      res.json(workspace);
+    } catch (error) {
+      handleRouteError(res, error, 'Unable to load workspace.');
+    }
+  });
+
+  app.get('/api/workspace/profiles', requireAuth, async (_req: AuthRequest, res) => {
+    try {
+      const profiles = await repo.getPublicProfiles();
+      res.json({ profiles });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load public profiles.');
+    }
+  });
+
+  app.get('/api/workspace/username-check', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const rawUsername = typeof req.query.username === 'string' ? req.query.username : '';
+      const result = await repo.checkUsernameAvailability(rawUsername, req.verifiedUser!.uid);
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to check username.');
+    }
+  });
+
+  app.put('/api/workspace/profile', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.verifiedUser!;
+      const updated = await repo.updateUserProfile({
+        uid: user.uid,
+        email: user.email,
+        displayName: String(req.body?.displayName || ''),
+        username: String(req.body?.username || ''),
+        bio: String(req.body?.bio || ''),
+        photoURL: String(req.body?.photoURL || ''),
+        activeAccent: req.body?.activeAccent,
+      });
+      res.json(updated);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update profile.');
+    }
+  });
+
+  app.post('/api/workspace/visit', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const result = await repo.recordVerifiedVisit({
+        uid: req.verifiedUser!.uid,
+        linkId: String(req.body?.linkId || ''),
+        title: String(req.body?.title || 'Smartlink'),
+        type: String(req.body?.type || 'smartlink'),
+        ownerName: String(req.body?.ownerName || 'Member'),
+        category: String(req.body?.category || 'Other'),
+        points: Number(req.body?.points ?? 10),
+      });
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to record visit.');
+    }
+  });
+
+  app.post('/api/workspace/shop', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.unlockShopPerk({
+        uid: req.verifiedUser!.uid,
+        nextUnlockedIds: req.body?.nextUnlockedIds,
+        activeAccent: req.body?.activeAccent,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to unlock shop perk.');
+    }
+  });
+
+  app.post('/api/workspace/follow', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.toggleFollow({
+        followerUid: req.verifiedUser!.uid,
+        followerName: String(req.body?.followerName || 'Member'),
+        followerUsername: String(req.body?.followerUsername || '@member'),
+        followerAvatar: String(req.body?.followerAvatar || ''),
+        targetId: String(req.body?.targetId || ''),
+        targetName: String(req.body?.targetName || 'Member'),
+        targetUsername: String(req.body?.targetUsername || '@member'),
+        targetAvatar: String(req.body?.targetAvatar || ''),
+        targetIsRealUser: Boolean(req.body?.targetIsRealUser),
+        currentlyFollowing: Boolean(req.body?.currentlyFollowing),
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update follow relationship.');
+    }
+  });
+
+  app.get('/api/workspace/follows', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const data = await repo.getUserFollows(req.verifiedUser!.uid);
+      res.json(data);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load follow relationships.');
+    }
+  });
+
+  app.get('/api/workspace/activities', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const items = await repo.getUserActivities(req.verifiedUser!.uid);
+      res.json({ activities: items });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load activities.');
+    }
+  });
+
+  // ===========================================================================
+  // COMMUNITY LINKS, VISITS & REPORTS
+  // ===========================================================================
+
+  app.get('/api/links/approved', requireAuth, async (_req: AuthRequest, res) => {
+    try {
+      const items = await repo.getApprovedLinks();
+      res.json({ links: items });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load community links.');
+    }
+  });
+
+  app.get('/api/links/mine', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const items = await repo.getMyLinks(req.verifiedUser!.uid);
+      res.json({ links: items });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load your submitted links.');
+    }
+  });
+
+  app.get('/api/links/visits', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const visits = await repo.getMyLinkVisits(req.verifiedUser!.uid);
+      res.json({ visits });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load visit history.');
+    }
+  });
+
+  app.get('/api/links/check-duplicate', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const urlKey = typeof req.query.urlKey === 'string' ? req.query.urlKey.trim() : '';
+      if (!urlKey) {
+        res.status(400).json({ error: 'urlKey is required.' });
+        return;
+      }
+      const result = await repo.checkDuplicateUrlKey(urlKey);
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to check duplicate link.');
+    }
+  });
+
+  app.post('/api/links', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const result = await repo.submitLink({
+        uid: req.verifiedUser!.uid,
+        ownerName: String(req.body?.ownerName || 'Member'),
+        ownerUsername: String(req.body?.ownerUsername || '@member'),
+        ownerAvatar: String(req.body?.ownerAvatar || ''),
+        type: req.body?.type === 'website' ? 'website' : 'smartlink',
+        title: String(req.body?.title || ''),
+        description: String(req.body?.description || ''),
+        rawUrl: String(req.body?.rawUrl || ''),
+        category: String(req.body?.category || 'Other'),
+        cooldownSec:
+          typeof req.body?.cooldownSec === 'number' ? req.body.cooldownSec : undefined,
+        targetGeos: Array.isArray(req.body?.targetGeos) ? req.body.targetGeos : undefined,
+      });
+      res.status(201).json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to submit link.');
+    }
+  });
+
+  app.put('/api/links/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.updateOwnLink({
+        uid: req.verifiedUser!.uid,
+        linkId: String(req.params.id || ''),
+        type: req.body?.type === 'website' ? 'website' : 'smartlink',
+        title: String(req.body?.title || ''),
+        description: String(req.body?.description || ''),
+        rawUrl: String(req.body?.rawUrl || ''),
+        category: String(req.body?.category || 'Other'),
+        targetGeos: Array.isArray(req.body?.targetGeos) ? req.body.targetGeos : undefined,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update link.');
+    }
+  });
+
+  app.delete('/api/links/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.verifiedUser!;
+      const wantsAdmin = req.query.asAdmin === 'true' || req.body?.asAdmin === true;
+      if (wantsAdmin && user.email !== ADMIN_EMAIL) {
+        res.status(403).json({ error: 'Unauthorized: Verified admin email required.' });
+        return;
+      }
+      await repo.deleteLink({
+        linkId: String(req.params.id || ''),
+        actorUid: user.uid,
+        actorEmail: user.email,
+        asAdmin: wantsAdmin,
+        reason: typeof req.body?.reason === 'string' ? req.body.reason : undefined,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to delete link.');
+    }
+  });
+
+  app.post('/api/links/visit-open', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const result = await repo.recordExternalLinkOpen({
+        uid: req.verifiedUser!.uid,
+        linkId: String(req.body?.linkId || ''),
+        linkTitle: String(req.body?.linkTitle || 'Smartlink'),
+        linkType: String(req.body?.linkType || 'smartlink'),
+        category: String(req.body?.category || 'Other'),
+        domain: String(req.body?.domain || 'example.com'),
+        url: String(req.body?.url || ''),
+        durationSec:
+          typeof req.body?.durationSec === 'number' ? req.body.durationSec : undefined,
+        cooldownSec:
+          typeof req.body?.cooldownSec === 'number' ? req.body.cooldownSec : undefined,
+      });
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to record link visit.');
+    }
+  });
+
+  app.post('/api/links/report', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.reportLink({
+        linkId: String(req.body?.linkId || ''),
+        reporterUid: req.verifiedUser!.uid,
+        reporterUsername: String(req.body?.reporterUsername || '@member'),
+        reason: String(req.body?.reason || ''),
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to report link.');
+    }
+  });
+
+  // ===========================================================================
+  // ADMIN MODERATION & MULTI (5) PAYMENTS
+  // ===========================================================================
+
+  app.get('/api/admin/overview', requireAuth, requireAdmin, async (_req: AuthRequest, res) => {
+    try {
+      const overview = await repo.getAdminOverview();
+      res.json(overview);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load admin overview.');
+    }
   });
 
   app.post(
-    '/api/adsterra/connect',
-    requireVerifiedFirebaseUser,
-    async (req: AuthenticatedRequest, res) => {
+    '/api/admin/links/:id/moderate',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const decision = req.body?.decision === 'rejected' ? 'rejected' : 'approved';
+        await repo.moderateLink({
+          linkId: String(req.params.id || ''),
+          decision,
+          note: String(req.body?.note || ''),
+          adminUid: req.verifiedUser!.uid,
+          adminEmail: req.verifiedUser!.email,
+        });
+        res.json({ ok: true });
+      } catch (error) {
+        handleRouteError(res, error, 'Failed to moderate link.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/reports/:id/resolve',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const action =
+          req.body?.action === 'resolve_and_remove' ? 'resolve_and_remove' : 'dismiss';
+        await repo.resolveReport({
+          reportId: String(req.params.id || ''),
+          action,
+          adminNote: String(req.body?.adminNote || ''),
+          adminUid: req.verifiedUser!.uid,
+          adminEmail: req.verifiedUser!.email,
+        });
+        res.json({ ok: true });
+      } catch (error) {
+        handleRouteError(res, error, 'Failed to resolve report.');
+      }
+    }
+  );
+
+  app.get('/api/payments/config', requireAuth, async (_req: AuthRequest, res) => {
+    try {
+      const config = await repo.getPaymentConfig({
+        bkashNumber: process.env.VITE_BKASH_PERSONAL_NUMBER?.trim() || '01700-000000',
+        nagadNumber: process.env.VITE_NAGAD_PERSONAL_NUMBER?.trim() || '01800-000000',
+      });
+      res.json({ config });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load payment numbers.');
+    }
+  });
+
+  app.get('/api/payments/me', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const data = await repo.getMyPaymentsAndEntitlement(req.verifiedUser!.uid);
+      res.json(data);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load your payment status.');
+    }
+  });
+
+  app.get('/api/payments/tx-check', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const rawTx = typeof req.query.txKey === 'string' ? req.query.txKey : '';
+      const txKey = normalizeAndValidateTxId(rawTx);
+      const used = await repo.isTransactionIdUsed(txKey);
+      res.json({ used, txKey });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to verify Transaction ID.');
+    }
+  });
+
+  app.post('/api/payments/request', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const txKey = normalizeAndValidateTxId(req.body?.transactionId);
+      const paymentMethod = req.body?.paymentMethod === 'nagad' ? 'nagad' : 'bkash';
+      const receiverNumber = validatePersonalNumber(
+        req.body?.paymentNumber,
+        paymentMethod === 'nagad' ? 'Nagad (Personal)' : 'bKash (Personal)'
+      );
+      const cleanSender = String(req.body?.senderNumber || '').trim().slice(0, 24);
+      if (cleanSender && !/^[0-9+\-\s]{6,24}$/.test(cleanSender)) {
+        throw new repo.DomainError(
+          'Please enter a valid sender mobile number (or leave it blank).'
+        );
+      }
+      const screenshotUrl = String(req.body?.screenshotUrl || '').trim();
+      if (!screenshotUrl) {
+        throw new repo.DomainError('Payment screenshot is required.');
+      }
+
+      const result = await repo.createPaymentRequest({
+        uid: req.verifiedUser!.uid,
+        userName: String(req.body?.userName || 'Member'),
+        userUsername: String(req.body?.userUsername || '@member'),
+        paymentMethod,
+        paymentNumber: receiverNumber,
+        senderNumber: cleanSender || undefined,
+        transactionId: txKey,
+        screenshotUrl,
+      });
+      res.status(201).json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to submit payment request.');
+    }
+  });
+
+  app.put(
+    '/api/admin/payments/config',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const bkashNumber = validatePersonalNumber(
+          req.body?.bkashNumber,
+          'bKash (Personal)'
+        );
+        const nagadNumber = validatePersonalNumber(
+          req.body?.nagadNumber,
+          'Nagad (Personal)'
+        );
+        const updated = await repo.updatePaymentConfig({
+          bkashNumber,
+          nagadNumber,
+          adminUid: req.verifiedUser!.uid,
+          adminEmail: req.verifiedUser!.email,
+        });
+        res.json({ config: updated });
+      } catch (error) {
+        handleRouteError(res, error, 'Failed to update payment configuration.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/payments/:id/review',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const decision = req.body?.decision === 'rejected' ? 'rejected' : 'approved';
+        await repo.reviewPaymentRequest({
+          requestId: String(req.params.id || ''),
+          decision,
+          adminNote: typeof req.body?.adminNote === 'string' ? req.body.adminNote : undefined,
+          verifiedProof: Boolean(req.body?.verifiedProof),
+          adminUid: req.verifiedUser!.uid,
+          adminEmail: req.verifiedUser!.email,
+        });
+        res.json({ ok: true });
+      } catch (error) {
+        handleRouteError(res, error, 'Failed to review payment request.');
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/payments/:id/revoke',
+    requireAuth,
+    requireAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        await repo.revokePaymentAccess({
+          requestId: String(req.params.id || ''),
+          adminNote: typeof req.body?.adminNote === 'string' ? req.body.adminNote : undefined,
+          adminUid: req.verifiedUser!.uid,
+          adminEmail: req.verifiedUser!.email,
+        });
+        res.json({ ok: true });
+      } catch (error) {
+        handleRouteError(res, error, 'Failed to revoke Multi (5) access.');
+      }
+    }
+  );
+
+  // ===========================================================================
+  // ADSTERRA INTEGRATIONS, PERSONAL SMARTLINKS & ENCRYPTED API VAULT (POSTGRES)
+  // ===========================================================================
+
+  app.get('/api/adsterra/integration', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const integration = await repo.getAdsterraIntegration(req.verifiedUser!.uid);
+      res.json({ integration });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load Adsterra integration.');
+    }
+  });
+
+  app.put('/api/adsterra/integration', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.upsertAdsterraIntegration({
+        uid: req.verifiedUser!.uid,
+        publisherId: String(req.body?.publisherId || ''),
+        publisherLabel: String(req.body?.publisherLabel || ''),
+        smartlinkTitle: String(req.body?.smartlinkTitle || ''),
+        smartlinkUrl: String(req.body?.smartlinkUrl || ''),
+        connectionMode:
+          req.body?.connectionMode === 'official_api_key'
+            ? 'official_api_key'
+            : 'manual_smartlink',
+        hasApiKey: Boolean(req.body?.hasApiKey),
+        apiKeyHint: String(req.body?.apiKeyHint || ''),
+        apiVerified: Boolean(req.body?.apiVerified),
+        verifiedDomainsCount: Number(req.body?.verifiedDomainsCount ?? 0),
+        verifiedPlacementsCount: Number(req.body?.verifiedPlacementsCount ?? 0),
+        lastSyncedAtMs:
+          typeof req.body?.lastSyncedAtMs === 'number' ? req.body.lastSyncedAtMs : null,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to save Adsterra integration.');
+    }
+  });
+
+  app.delete('/api/adsterra/integration', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.verifiedUser!.uid;
+      await Promise.all([
+        repo.deleteAdsterraVaultRecord(uid),
+        repo.disconnectAdsterraIntegration(uid),
+      ]);
+      res.json(toSafeStatusPayload(null));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to disconnect Adsterra integration.');
+    }
+  });
+
+  app.get('/api/adsterra/smartlinks', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const smartlinks = await repo.getUserSmartlinks(req.verifiedUser!.uid);
+      res.json({ smartlinks });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to load personal Smartlinks.');
+    }
+  });
+
+  app.post('/api/adsterra/smartlinks', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const result = await repo.createUserSmartlink({
+        uid: req.verifiedUser!.uid,
+        title: String(req.body?.title || ''),
+        rawUrl: String(req.body?.rawUrl || ''),
+        category: String(req.body?.category || 'Other'),
+      });
+      res.status(201).json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to create personal Smartlink.');
+    }
+  });
+
+  app.put('/api/adsterra/smartlinks/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.updateUserSmartlink({
+        uid: req.verifiedUser!.uid,
+        id: String(req.params.id || ''),
+        title: String(req.body?.title || ''),
+        rawUrl: String(req.body?.rawUrl || ''),
+        category: String(req.body?.category || 'Other'),
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update personal Smartlink.');
+    }
+  });
+
+  app.delete('/api/adsterra/smartlinks/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.deleteUserSmartlink({
+        uid: req.verifiedUser!.uid,
+        id: String(req.params.id || ''),
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to delete personal Smartlink.');
+    }
+  });
+
+  app.get('/api/adsterra/status', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const record = await repo.getAdsterraVaultRecord(req.verifiedUser!.uid);
+      res.json(toSafeStatusPayload(record));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to check Adsterra status.');
+    }
+  });
+
+  app.post('/api/adsterra/connect', requireAuth, async (req: AuthRequest, res) => {
+    try {
       const uid = req.verifiedUser!.uid;
       const rawKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
       const verifyWithAdsterra = req.body?.verifyWithAdsterra !== false;
@@ -977,8 +1432,7 @@ export function createApp() {
       }
 
       const encrypted = encryptSecret(rawKey);
-      const vault = readSecretsVault();
-      vault[uid] = {
+      const saved = await repo.upsertAdsterraVaultRecord(uid, {
         ...encrypted,
         keyHint: maskKeyHint(rawKey),
         apiVerified,
@@ -986,24 +1440,22 @@ export function createApp() {
         verifiedPlacementsCount: placementsCount,
         domainsPreview,
         placementsPreview,
-        statsSummary,
-        detailedStats,
+        statsSummary: statsSummary as unknown as Record<string, unknown> | null,
+        detailedStats: detailedStats as unknown as Record<string, unknown> | null,
         lastSyncedAtMs,
         updatedAtMs: Date.now(),
-      };
-      writeSecretsVault(vault);
+      });
 
-      res.json(toSafeStatusPayload(vault[uid]));
+      res.json(toSafeStatusPayload(saved));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to connect Adsterra API Key.');
     }
-  );
+  });
 
-  app.post(
-    '/api/adsterra/sync',
-    requireVerifiedFirebaseUser,
-    async (req: AuthenticatedRequest, res) => {
+  app.post('/api/adsterra/sync', requireAuth, async (req: AuthRequest, res) => {
+    try {
       const uid = req.verifiedUser!.uid;
-      const vault = readSecretsVault();
-      const record = vault[uid];
+      const record = await repo.getAdsterraVaultRecord(uid);
       if (!record) {
         res.status(404).json({
           error: 'No Adsterra API Key is saved for your account.',
@@ -1021,28 +1473,29 @@ export function createApp() {
 
       try {
         const snapshot = await fetchAdsterraOfficialSnapshot(apiKey);
-        const latestVault = readSecretsVault();
-        const latestRecord = latestVault[uid];
+        const latestRecord = await repo.getAdsterraVaultRecord(uid);
         if (!latestRecord) {
           res.status(404).json({
             error: 'Adsterra API Key was disconnected during sync.',
           });
           return;
         }
-        latestVault[uid] = {
-          ...latestRecord,
+        const saved = await repo.upsertAdsterraVaultRecord(uid, {
+          iv: latestRecord.iv,
+          authTag: latestRecord.authTag,
+          ciphertext: latestRecord.ciphertext,
+          keyHint: latestRecord.keyHint,
           apiVerified: true,
           verifiedDomainsCount: snapshot.domainsCount,
           verifiedPlacementsCount: snapshot.placementsCount,
           domainsPreview: snapshot.domainsPreview,
           placementsPreview: snapshot.placementsPreview,
-          statsSummary: snapshot.statsSummary,
-          detailedStats: snapshot.detailedStats,
+          statsSummary: snapshot.statsSummary as unknown as Record<string, unknown> | null,
+          detailedStats: snapshot.detailedStats as unknown as Record<string, unknown> | null,
           lastSyncedAtMs: Date.now(),
           updatedAtMs: Date.now(),
-        };
-        writeSecretsVault(latestVault);
-        res.json(toSafeStatusPayload(latestVault[uid]));
+        });
+        res.json(toSafeStatusPayload(saved));
       } catch (err) {
         res.status(502).json({
           error:
@@ -1051,16 +1504,15 @@ export function createApp() {
               : 'Adsterra Publisher API sync request failed.',
         });
       }
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to sync Adsterra stats.');
     }
-  );
+  });
 
-  app.post(
-    '/api/adsterra/stats',
-    requireVerifiedFirebaseUser,
-    async (req: AuthenticatedRequest, res) => {
+  app.post('/api/adsterra/stats', requireAuth, async (req: AuthRequest, res) => {
+    try {
       const uid = req.verifiedUser!.uid;
-      const vault = readSecretsVault();
-      const record = vault[uid];
+      const record = await repo.getAdsterraVaultRecord(uid);
       if (!record) {
         res.status(404).json({
           error: 'No Adsterra API Key is saved for your account.',
@@ -1122,6 +1574,7 @@ export function createApp() {
       const country = typeof req.body?.country === 'string' ? req.body.country.trim() : undefined;
 
       try {
+        const prevDetailed = record.detailedStats as AdsterraDetailedStats | null;
         const detailedStats = await fetchAdsterraDetailedStats({
           apiKey,
           preset,
@@ -1132,8 +1585,8 @@ export function createApp() {
           country,
           domainsPreview: record.domainsPreview,
           placementsPreview: record.placementsPreview,
-          cachedPeriods: record.detailedStats?.periods ?? null,
-          cachedFetchedAtMs: record.detailedStats?.fetchedAtMs ?? null,
+          cachedPeriods: prevDetailed?.periods ?? null,
+          cachedFetchedAtMs: prevDetailed?.fetchedAtMs ?? null,
         });
 
         const nextSummary: StatsSummary = {
@@ -1146,23 +1599,30 @@ export function createApp() {
           ctr: detailedStats.periods.last7d.ctr,
         };
 
-        const latestVault = readSecretsVault();
-        const latestRecord = latestVault[uid];
+        const latestRecord = await repo.getAdsterraVaultRecord(uid);
         if (!latestRecord) {
           res.status(404).json({
             error: 'Adsterra API Key was disconnected while fetching stats.',
           });
           return;
         }
-        latestVault[uid] = {
-          ...latestRecord,
-          statsSummary: nextSummary,
-          detailedStats,
+
+        const saved = await repo.upsertAdsterraVaultRecord(uid, {
+          iv: latestRecord.iv,
+          authTag: latestRecord.authTag,
+          ciphertext: latestRecord.ciphertext,
+          keyHint: latestRecord.keyHint,
+          apiVerified: latestRecord.apiVerified,
+          verifiedDomainsCount: latestRecord.verifiedDomainsCount,
+          verifiedPlacementsCount: latestRecord.verifiedPlacementsCount,
+          domainsPreview: latestRecord.domainsPreview,
+          placementsPreview: latestRecord.placementsPreview,
+          statsSummary: nextSummary as unknown as Record<string, unknown>,
+          detailedStats: detailedStats as unknown as Record<string, unknown>,
           lastSyncedAtMs: Date.now(),
           updatedAtMs: Date.now(),
-        };
-        writeSecretsVault(latestVault);
-        res.json(toSafeStatusPayload(latestVault[uid]));
+        });
+        res.json(toSafeStatusPayload(saved));
       } catch (err) {
         res.status(502).json({
           error:
@@ -1171,22 +1631,19 @@ export function createApp() {
               : 'Failed to fetch detailed statistics from Adsterra API.',
         });
       }
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch detailed statistics.');
     }
-  );
+  });
 
-  app.delete(
-    '/api/adsterra/disconnect',
-    requireVerifiedFirebaseUser,
-    (req: AuthenticatedRequest, res) => {
-      const uid = req.verifiedUser!.uid;
-      const vault = readSecretsVault();
-      if (vault[uid]) {
-        delete vault[uid];
-        writeSecretsVault(vault);
-      }
-      res.json(toSafeStatusPayload(undefined));
+  app.delete('/api/adsterra/disconnect', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      await repo.deleteAdsterraVaultRecord(req.verifiedUser!.uid);
+      res.json(toSafeStatusPayload(null));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to disconnect Adsterra API Key.');
     }
-  );
+  });
 
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API endpoint not found.' });
@@ -1203,7 +1660,7 @@ export function createApp() {
       return;
     }
     if (errObj?.type === 'entity.too.large') {
-      res.status(413).json({ error: 'Request payload exceeds the 64KB limit.' });
+      res.status(413).json({ error: 'Request payload exceeds the 1MB limit.' });
       return;
     }
     res.status(typeof errObj?.status === 'number' ? errObj.status : 500).json({

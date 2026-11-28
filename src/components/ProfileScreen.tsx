@@ -558,13 +558,13 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </div>
       </section>
 
-      {/* 2. User Statistics (Real Firestore Data) */}
+      {/* 2. User Statistics (Synced Cloud Data) */}
       <section aria-label="User statistics">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="font-display text-lg font-bold text-white">Account Statistics</h2>
           <span className="flex items-center gap-1.5 text-xs font-semibold text-[#00FF87]">
             <ShieldCheck className="h-3.5 w-3.5" />
-            <span>Synced from Firestore</span>
+            <span>Synced with cloud workspace</span>
           </span>
         </div>
 
@@ -810,7 +810,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             {filteredActivities.length === 0 ? (
               <div className="rounded-2xl border border-white/10 bg-[#070B20]/65 p-6 text-center text-xs text-slate-400">
                 No activity recorded in this category yet. Complete a visit or follow a creator to
-                see real-time Firestore logs here.
+                see real-time activity logs here.
               </div>
             ) : (
               filteredActivities.map((item) => {
